@@ -91,6 +91,7 @@ def unlock_course_achievements(user: User) -> None:
         Course.CourseType.PHYSICAL: '体育',
         Course.CourseType.AESTHETICS: '美育',
         Course.CourseType.LABOUR: '劳动教育',
+        Course.CourseType.OTHER: '其他',
     }
     for course_type in course_types:
         unlock_achievement(user, '首次修习' + COURSE_DICT[course_type] + '课程')

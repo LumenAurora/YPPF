@@ -182,8 +182,6 @@ def addSingleCourseActivity(request: HttpRequest):
         except Exception as e:
             return redirect(message_url(wrong("课程活动创建失败!"), request.path))
 
-
-
     # 前端使用量
     html_display["applicant_name"] = me.oname
     html_display["app_avatar_path"] = me.get_user_ava()
@@ -245,7 +243,8 @@ def showCourseActivity(request: HttpRequest):
         request.user, navbar_name="我的活动")
 
     if request.method == "GET":
-        html_display["warn_code"], html_display["warn_message"] = my_messages.get_request_message(request)
+        html_display["warn_code"], html_display["warn_message"] = my_messages.get_request_message(
+            request)
 
     # 取消单次活动
     if request.method == "POST" and request.POST:
@@ -318,7 +317,7 @@ def showCourseRecord(request: UserRequest) -> HttpResponse:
     semester = GLOBAL_CONFIG.semester
 
     course = Course.objects.activated(noncurrent=False).filter(organization=me)
-    if len(course) == 0: # 尚未开课的情况
+    if len(course) == 0:  # 尚未开课的情况
         return redirect(message_url(wrong('没有检测到该组织本学期开设的课程。')))
     # TODO: 报错 这是代码不应该出现的bug
     assert len(course) == 1, "检测到该组织的课程超过一门，属于不可预料的错误，请及时处理！"
@@ -410,10 +409,11 @@ def showCourseRecord(request: UserRequest) -> HttpResponse:
                     "bonus_hours": record.bonus_hours,
                     "total_hours": record.total_hours
                 })
-            CourseRecord.objects.bulk_update(record_search, ["attend_times", "total_hours"])
+            CourseRecord.objects.bulk_update(
+                record_search, ["attend_times", "total_hours"])
             # 如果点击提交学时按钮，修改数据库之后，跳转至已结束的活动界面
             if request.method == "POST":
-                return(redirect(message_url(messages, "/showCourseActivity")))
+                return (redirect(message_url(messages, "/showCourseActivity")))
 
     # 前端呈现信息，用于展示
     course_info = {
@@ -443,7 +443,7 @@ def selectCourse(request: HttpRequest):
     3. 显示选课结果
 
     用户权限：学生和老师可以进入，组织不能进入；只有学生可以进行选课
-    
+
     :param request: POST courseid=<int> & action= "select" or "cancel"
     :type request: HttpRequest
     """
@@ -491,7 +491,8 @@ def selectCourse(request: HttpRequest):
             wrong("选课过程出现错误！请联系管理员。", html_display)
 
     html_display["current_year"] = GLOBAL_CONFIG.acadamic_year
-    html_display["semester"] = ("春" if GLOBAL_CONFIG.semester == Semester.SPRING else "秋")
+    html_display["semester"] = (
+        "春" if GLOBAL_CONFIG.semester == Semester.SPRING else "秋")
 
     html_display["yx_election_start"] = APP_CONFIG.yx_election_start
     html_display["yx_election_end"] = APP_CONFIG.yx_election_end
@@ -527,7 +528,7 @@ def selectCourse(request: HttpRequest):
     for type, label in Course.CourseType.choices:
         # 前端使用键呈现
         courses[label] = course_to_display(unselected_courses.filter(type=type),
-                                          me)
+                                           me)
 
     unselected_display = course_to_display(unselected_courses, me)
     selected_display = course_to_display(selected_courses, me)
@@ -558,7 +559,8 @@ def viewCourse(request: HttpRequest):
     me = utils.get_person_or_org(request.user)
     course_display = course_to_display(course, me, detail=True)
 
-    bar_display = utils.get_sidebar_and_navbar(request.user, course_display[0]["name"])
+    bar_display = utils.get_sidebar_and_navbar(
+        request.user, course_display[0]["name"])
 
     return render(request, "course/course_info.html", locals())
 
@@ -582,17 +584,17 @@ def addCourse(request: HttpRequest, cid=None):
     # 检查：不是超级用户，必须是小组，修改是必须是自己
     html_display = {}
     # assert valid  已经在check_user_access检查过了
-    me = utils.get_person_or_org(request.user) # 这里的me应该为小组账户
+    me = utils.get_person_or_org(request.user)  # 这里的me应该为小组账户
     if cid is None:
         if not request.user.is_org() or me.otype.otype_name != APP_CONFIG.type_name:
             return redirect(message_url(wrong('书院课程账号才能发起课程!')))
-        #暂时仅支持一个课程账号一学期只能开一门课
+        # 暂时仅支持一个课程账号一学期只能开一门课
         courses = Course.objects.activated().filter(organization=me)
         if courses.exists():
             cid = courses[0].id
             return redirect(message_url(
-                        succeed('您已在本学期创建过课程，已为您自动跳转!'),
-                        f'/editCourse/{cid}'))
+                succeed('您已在本学期创建过课程，已为您自动跳转!'),
+                f'/editCourse/{cid}'))
         edit = False
     else:
         try:
@@ -623,7 +625,6 @@ def addCourse(request: HttpRequest, cid=None):
             # 发起选课
             course_DDL = str_to_time(APP_CONFIG.btx_election_end)
 
-
             if datetime.now() > course_DDL:
                 return redirect(message_url(succeed("已超过选课时间节点，无法发起课程！"),
                                             f'/showCourseActivity/'))
@@ -647,13 +648,15 @@ def addCourse(request: HttpRequest, cid=None):
     html_display["app_avatar_path"] = me.get_user_ava()
     html_display["today"] = datetime.now().strftime("%Y-%m-%d")
     course_type_all = [
-       ["德" , Course.CourseType.MORAL] ,
-       ["智" , Course.CourseType.INTELLECTUAL] ,
-       ["体" , Course.CourseType.PHYSICAL] ,
-       ["美" , Course.CourseType.AESTHETICS],
-       ["劳" , Course.CourseType.LABOUR],
+        ["德", Course.CourseType.MORAL],
+        ["智", Course.CourseType.INTELLECTUAL],
+        ["体", Course.CourseType.PHYSICAL],
+        ["美", Course.CourseType.AESTHETICS],
+        ["劳", Course.CourseType.LABOUR],
+        ["其他", Course.CourseType.OTHER],
     ]
-    defaultpics = [{"src": f"/static/assets/img/announcepics/{i+1}.JPG", "id": f"picture{i+1}"} for i in range(5)]
+    defaultpics = [{"src": f"/static/assets/img/announcepics/{i+1}.JPG",
+                    "id": f"picture{i+1}"} for i in range(5)]
 
     if edit:
         course = Course.objects.get(id=cid)
@@ -667,15 +670,15 @@ def addCourse(request: HttpRequest, cid=None):
         introduction = utils.escape_for_templates(course.introduction)
         teaching_plan = utils.escape_for_templates(course.teaching_plan)
         hours_per_class = course.hours_per_class
-        record_cal_method = utils.escape_for_templates(course.record_cal_method)
+        record_cal_method = utils.escape_for_templates(
+            course.record_cal_method)
         status = course.status
         need_apply = course.need_apply
         publish_day = course.publish_day
         capacity = course.capacity
         type = course.type
         current_participants = course.current_participants
-        QRcode=course.QRcode
-
+        QRcode = course.QRcode
 
     if not edit:
         bar_display = utils.get_sidebar_and_navbar(request.user, "发起课程")
@@ -697,7 +700,8 @@ def outputRecord(request: UserRequest):
     """
     me = utils.get_person_or_org(request.user)
     # 获取默认审核老师，不应该出错
-    examine_teachers = NaturalPerson.objects.get_teachers(APP_CONFIG.audit_teachers)
+    examine_teachers = NaturalPerson.objects.get_teachers(
+        APP_CONFIG.audit_teachers)
 
     if me not in examine_teachers:
         return redirect(message_url(wrong("只有书院课审核老师账号可以访问该链接！")))
@@ -737,7 +741,8 @@ def outputAllSelectInfo(request: UserRequest):
     """
     me = utils.get_person_or_org(request.user)
     # 获取默认审核老师，不应该出错
-    examine_teachers = NaturalPerson.objects.get_teachers(APP_CONFIG.audit_teachers)
+    examine_teachers = NaturalPerson.objects.get_teachers(
+        APP_CONFIG.audit_teachers)
 
     if me not in examine_teachers:
         return redirect(message_url(wrong("只有书院课审核老师账号可以访问该链接！")))

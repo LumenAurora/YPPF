@@ -269,7 +269,8 @@ class NaturalPersonManager(models.Manager['NaturalPerson']):
         '''姓名或工号获取教师'''
         teachers = self.teachers(activate=activate)
         name_query = SQ.mq(NaturalPerson.name, IN=identifiers)
-        uid_query = SQ.mq(NaturalPerson.person_id, User.username, IN=identifiers)
+        uid_query = SQ.mq(NaturalPerson.person_id,
+                          User.username, IN=identifiers)
         return teachers.filter(name_query | uid_query)
 
     def get_teacher(self, name_or_id: str, activate: bool = True):
@@ -332,7 +333,6 @@ class NaturalPerson(models.Model):
         INSTRUCTOR = (2, "住宿辅导员")
         POSTPONED = (3, "延毕")
         ONLEAVE = (4, "休学")
-        
 
     status = models.SmallIntegerField(
         "在校状态", choices=GraduateStatus.choices, default=0)
@@ -398,7 +398,7 @@ class NaturalPerson(models.Model):
     def is_teacher(self, activate=True):
         result = self.identity == NaturalPerson.Identity.TEACHER
         if activate:
-            result &= self.status != NaturalPerson.GraduateStatus.GRADUATED # 已退休教师不视为教师
+            result &= self.status != NaturalPerson.GraduateStatus.GRADUATED  # 已退休教师不视为教师
         return result
 
     def get_accept_promote_display(self):
@@ -465,7 +465,8 @@ class Freshman(models.Model):
 
     def exists(self):
         user_exist = User.objects.filter(username=self.sid).exists()
-        person_exist = SQ.mfilter(NaturalPerson.person_id, username=self.sid).exists()
+        person_exist = SQ.mfilter(
+            NaturalPerson.person_id, username=self.sid).exists()
         return "person" if person_exist else ("user" if user_exist else "")
 
 
@@ -1028,8 +1029,8 @@ class Activity(CommentBase):
         if self.current_participants >= self.capacity:
             return 2
         if (self.current_participants >= 30
-            or (self.capacity >= 10 and self.current_participants >= self.capacity * 0.85)
-            ):
+                    or (self.capacity >= 10 and self.current_participants >= self.capacity * 0.85)
+                ):
             return 1
         return 0
 
@@ -1117,8 +1118,10 @@ class Participation(models.Model):
         verbose_name_plural = verbose_name
         ordering = ["activity_id"]
 
-    activity = models.ForeignKey(Activity, on_delete=models.CASCADE, related_name='+')
-    person = models.ForeignKey(NaturalPerson, on_delete=models.CASCADE, related_name='+')
+    activity = models.ForeignKey(
+        Activity, on_delete=models.CASCADE, related_name='+')
+    person = models.ForeignKey(
+        NaturalPerson, on_delete=models.CASCADE, related_name='+')
 
     @necessary_for_frontend(person)
     def get_participant(self):
@@ -1434,8 +1437,8 @@ class ModifyRecord(models.Model):
         verbose_name_plural = verbose_name
         ordering = ["-time"]
     user = models.ForeignKey(User, on_delete=models.SET_NULL,
-                                   related_name="modify_records",
-                                   to_field='username', blank=True, null=True)
+                             related_name="modify_records",
+                             to_field='username', blank=True, null=True)
     usertype = models.CharField('用户类型', max_length=16, default='', blank=True)
     name = models.CharField('名称', max_length=32, default='', blank=True)
     info = models.TextField('相关信息', default='', blank=True)
@@ -1523,6 +1526,7 @@ class Course(models.Model):
         PHYSICAL = (2, "体")
         AESTHETICS = (3, "美")
         LABOUR = (4, "劳")
+        OTHER = (5, "其他")
 
     type = models.SmallIntegerField("课程类型", choices=CourseType.choices)
 
@@ -1593,7 +1597,8 @@ class CourseParticipant(models.Model):
         verbose_name = "4.课程报名情况"
         verbose_name_plural = verbose_name
         constraints = [
-            models.UniqueConstraint(fields = ['course', 'person'], name='Unique course selection record')
+            models.UniqueConstraint(
+                fields=['course', 'person'], name='Unique course selection record')
         ]
 
     course = models.ForeignKey(Course, on_delete=models.CASCADE,
@@ -1641,8 +1646,9 @@ class CourseRecord(models.Model):
 
         constraints = [
             models.CheckConstraint(
-                check = Q(total_hours = F('bonus_hours') + F('attend_times') * F('hours_per_class')),
-                name = "total_hours_is_sum"
+                check=Q(total_hours=F('bonus_hours') +
+                        F('attend_times') * F('hours_per_class')),
+                name="total_hours_is_sum"
             )
         ]
 
@@ -1858,7 +1864,7 @@ class Pool(models.Model):
     redeem_end = models.DateTimeField('兑奖结束时间', null=True, blank=True)
     # 如果activity非空，只有参加了该活动的用户可以参与这个奖池的兑换。
     activity = models.ForeignKey(Activity, on_delete=models.SET_NULL,
-        null=True, blank=True, default=None)
+                                 null=True, blank=True, default=None)
 
     @invalid_for_frontend
     def __str__(self):
@@ -1880,7 +1886,7 @@ class PoolItem(models.Model):
 
     pool = models.ForeignKey(Pool, verbose_name='奖池', on_delete=models.CASCADE)
     prize = models.ForeignKey(Prize, verbose_name='奖品', on_delete=models.CASCADE,
-                                     null=True, blank=True)
+                              null=True, blank=True)
     origin_num = models.IntegerField('初始数量')
     consumed_num = models.IntegerField('已兑换', default=0)
     # 下面三个在 pool 类型为兑换奖池时有效
@@ -1963,25 +1969,27 @@ class ActivitySummary(models.Model):
 
 class HomepageImageManager(models.Manager['HomepageImage']):
     def activated(self):
-        return self.filter(activated = True)
+        return self.filter(activated=True)
 
 
 class HomepageImage(models.Model):
     '''首页上展示的功能介绍图片。之前叫做 guide pictures. 不包含活动宣传、活动总结的图片。
 
     sort_id 域记录的是图片在首页展示时的相对顺序。这个数字越小，越靠前展示。数字相同的图片将以随机顺序展示。
-    
+
     '''
     class Meta:
         verbose_name = "首页图片"
         verbose_name_plural = verbose_name
 
-    redirect_url = models.CharField("跳转URL", max_length = 50, default = "", blank = True)
-    image = models.ImageField("图片", upload_to = "homepage_image/")
-    description = models.CharField("图片说明", max_length = 50, default = "", blank = True)
+    redirect_url = models.CharField(
+        "跳转URL", max_length=50, default="", blank=True)
+    image = models.ImageField("图片", upload_to="homepage_image/")
+    description = models.CharField(
+        "图片说明", max_length=50, default="", blank=True)
     upload_date = models.DateTimeField("上传时间", auto_now_add=True)
-    sort_id = models.SmallIntegerField("展示顺序", default = 0)
-    activated = models.BooleanField("是否启用", default = True)
+    sort_id = models.SmallIntegerField("展示顺序", default=0)
+    activated = models.BooleanField("是否启用", default=True)
 
     def __str__(self):
         return self.image.name + ' ' + self.description
