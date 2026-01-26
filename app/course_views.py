@@ -647,14 +647,9 @@ def addCourse(request: HttpRequest, cid=None):
     html_display["applicant_name"] = me.oname
     html_display["app_avatar_path"] = me.get_user_ava()
     html_display["today"] = datetime.now().strftime("%Y-%m-%d")
-    course_type_all = [
-        ["德", Course.CourseType.MORAL],
-        ["智", Course.CourseType.INTELLECTUAL],
-        ["体", Course.CourseType.PHYSICAL],
-        ["美", Course.CourseType.AESTHETICS],
-        ["劳", Course.CourseType.LABOUR],
-        ["其他", Course.CourseType.OTHER],
-    ]
+    # 从 CourseType 枚举动态生成课程类型列表，避免硬编码
+    course_type_all = [[label, value]
+                       for value, label in Course.CourseType.choices]
     defaultpics = [{"src": f"/static/assets/img/announcepics/{i+1}.JPG",
                     "id": f"picture{i+1}"} for i in range(5)]
 
