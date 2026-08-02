@@ -168,7 +168,10 @@ def send_wechat(
     users = _get_available_users(users)
     if not users:
         return logger.warning('没有可用用户')
-    content = f'{title}<title>{message}'
+    if message:
+        content = title + chr(10) + message
+    else:
+        content = title
     if card:
         if url is not None:
             url = build_full_url(url)
