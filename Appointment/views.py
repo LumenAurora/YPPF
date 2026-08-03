@@ -278,7 +278,6 @@ def credit(request):
     return render(request, 'Appointment/admin-credit.html', render_context)
 
 
-@identity_check(redirect_field_name='origin', auth_func=lambda x: True)
 def _room_has_free_slot(room, search_date):
     """#974: 判断房间在指定日期是否仍有可预约空位（任一30分钟时间块空闲即算）。"""
     if room.Rstatus == Room.Status.FORBIDDEN:
@@ -303,6 +302,8 @@ def _room_has_free_slot(room, search_date):
             return True
     return False
 
+
+@identity_check(redirect_field_name='origin', auth_func=lambda x: True)
 def index(request):  # 主页
     render_context = {}
     render_context.update(
@@ -384,13 +385,11 @@ def index(request):  # 主页
                 request_time[3:5]), int(request_time[6:10])
             re_time = datetime(year, month, day)  # 获取目前request时间的datetime结构
             if re_time.date() < datetime.now().date():  # 如果搜过去时间
-                render_context.update(search_code=1,
-                                      search_message="请不要搜索已经过去的时间!")
+                wrong("请不要搜索已经过去的时间!", render_context)
                 return render(request, 'Appointment/index.html', render_context)
             elif re_time.date() - datetime.now().date() > timedelta(days=6):
                 # 查看了7天之后的
-                render_context.update(search_code=1,
-                                      search_message="只能查看最近7天的情况!")
+                wrong("只能查看最近7天的情况!", render_context)
                 return render(request, 'Appointment/index.html', render_context)
             # #974: 日期搜索直接展示当天可预约的地下室，而非跳转
             search_date = re_time.date()
