@@ -278,60 +278,12 @@ def credit(request):
     return render(request, 'Appointment/admin-credit.html', render_context)
 
 
-# #974: 三个区块的搜索互相独立，scope -> (日期字段名, 房间列表的上下文变量名)
-_SEARCH_SCOPES = {
-    'func': ('func_request_time', 'function_room_list'),
-    'talk': ('request_time', 'talk_room_list'),
-    'russ': ('russ_request_time', 'russian_room_list'),
-}
-
-
-def _parse_search_date(date_str: str):
-    """#974: 解析搜索日期，兼容DD/MM/YYYY与DD-MM-YYYY两种分隔符。"""
-    try:
-        return datetime.strptime(date_str.strip().replace('/', '-'), '%d-%m-%Y').date()
-    except ValueError:
-        return None
-
-
-def _parse_search_time(time_str: str):
-    """#974: 解析搜索时段中的时间，接受HH:MM或HH:MM:SS。"""
-    for fmt in ('%H:%M', '%H:%M:%S'):
-        try:
-            return datetime.strptime(time_str.strip(), fmt).time()
-        except ValueError:
-            continue
-    return None
-
-
-def _room_matches(room: Room, search_date: date, start_time=None,
-                  finish_time=None, capacity=None) -> bool:
-    """#974: 判断房间是否满足搜索条件。
-
-    - 人数：需落在房间的[Rmin, Rmax]区间内；
-    - 未指定时段：当天任意30分钟时间块空闲即视为可预约；
-    - 指定时段：该时段覆盖的时间块必须全部空闲。
-    """
+def _room_has_free_slot(room, search_date):
+    """#974: 判断房间在指定日期是否仍有可预约空位（任一30分钟时间块空闲即算）。"""
     if room.Rstatus == Room.Status.FORBIDDEN:
         return False
-    if capacity is not None and not room.Rmin <= capacity <= room.Rmax:
-        return False
-    max_stamp_id = web_func.get_time_id(room, room.Rfinish, mode='leftopen')
+    max_stamp_id = web_func.get_time_id(room, room.Rfinish, mode="leftopen")
     if max_stamp_id < 0:
-        return False
-    exact_range = start_time is not None or finish_time is not None
-    left_id, right_id = 0, max_stamp_id
-    if start_time is not None:
-        left_id = max(left_id, web_func.get_time_id(room, start_time))
-    if finish_time is not None:
-        right_id = min(right_id, web_func.get_time_id(
-            room, finish_time, mode='leftopen'))
-    if search_date == datetime.now().date():
-        now_id = web_func.get_time_id(room, datetime.now().time())
-        if exact_range and now_id > left_id:
-            return False                    # 指定时段已经开始，无法完整预约
-        left_id = max(left_id, now_id)
-    if right_id < left_id:
         return False
     booked = set()
     appoints = Appoint.objects.not_canceled().filter(
@@ -340,15 +292,15 @@ def _room_matches(room: Room, search_date: date, start_time=None,
         Astart__date__lt=search_date + timedelta(days=1),
     )
     for appoint in appoints:
-        booked.update(web_func.timerange2idlist(
-            room.Rid, appoint.Astart, appoint.Afinish, max_stamp_id))
-    for stamp_id in range(left_id, right_id + 1):
-        if stamp_id in booked:
-            if exact_range:
-                return False
-        elif not exact_range:
+        for i in web_func.timerange2idlist(room.Rid, appoint.Astart, appoint.Afinish, max_stamp_id):
+            booked.add(i)
+    start_id = 0
+    if search_date == datetime.now().date():
+        start_id = max(start_id, web_func.get_time_id(room, datetime.now().time()))
+    for i in range(start_id, max_stamp_id + 1):
+        if i not in booked:
             return True
-    return exact_range
+    return False
 
 
 @identity_check(redirect_field_name='origin', auth_func=lambda x: True)
@@ -415,70 +367,47 @@ def index(request):  # 主页
     )
 
     if request.method == "POST":
-        # #974: 三个区块的搜索彼此独立，由search_scope决定只筛选哪一个列表
-        scope = request.POST.get('search_scope', '')
-        if scope not in _SEARCH_SCOPES:
-            # 兼容未携带search_scope的旧表单：按日期字段名推断区块
-            for guess, (guess_field, _) in _SEARCH_SCOPES.items():
-                if request.POST.get(guess_field) is not None:
-                    scope = guess
-                    break
-        if scope not in _SEARCH_SCOPES:
-            return render(request, 'Appointment/index.html', render_context)
 
-        date_field, list_key = _SEARCH_SCOPES[scope]
-        date_str = (request.POST.get(date_field) or '').strip()
-        start_str = (request.POST.get('start_time') or '').strip()
-        finish_str = (request.POST.get('finish_time') or '').strip()
-        capacity_str = (request.POST.get('capacity') or '').strip()
-        if not any([date_str, start_str, finish_str, capacity_str]):
-            # 什么条件都没填，等同于不筛选
-            return render(request, 'Appointment/index.html', render_context)
-
-        today = datetime.now().date()
-        if date_str:
-            search_date = _parse_search_date(date_str)
-            if search_date is None:
-                wrong('日期格式不正确，请重新选择!', render_context)
-                return render(request, 'Appointment/index.html', render_context)
+        # YHT: added for Russian search
+        request_time = request.POST.get("request_time", None)
+        russ_request_time = request.POST.get("russ_request_time", None)
+        check_type = ""
+        if request_time is None and russ_request_time is not None:
+            check_type = "russ"
+            request_time = russ_request_time
+        elif request_time is not None and russ_request_time is None:
+            check_type = "talk"
         else:
-            search_date = today                 # 只填时段或人数时默认查询当天
-        if search_date < today:
-            wrong('请不要搜索已经过去的时间!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
-        if search_date - today > timedelta(days=6):
-            wrong('只能查看最近7天的情况!', render_context)
             return render(request, 'Appointment/index.html', render_context)
 
-        start_time = _parse_search_time(start_str) if start_str else None
-        finish_time = _parse_search_time(finish_str) if finish_str else None
-        if (start_str and start_time is None) or (finish_str and finish_time is None):
-            wrong('时段格式不正确，请重新选择!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
-        if start_time is not None and finish_time is not None and start_time >= finish_time:
-            wrong('时段的开始时间应早于结束时间!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
-
-        capacity = None
-        if capacity_str:
-            if not capacity_str.isdigit() or int(capacity_str) <= 0:
-                wrong('请输入正确的使用人数!', render_context)
+        if request_time != None and request_time != "":  # 初始加载或者不选时间直接搜索则直接返回index页面，否则进行如下反查时间
+            day, month, year = int(request_time[:2]), int(
+                request_time[3:5]), int(request_time[6:10])
+            re_time = datetime(year, month, day)  # 获取目前request时间的datetime结构
+            if re_time.date() < datetime.now().date():  # 如果搜过去时间
+                wrong("请不要搜索已经过去的时间!", render_context)
                 return render(request, 'Appointment/index.html', render_context)
-            capacity = int(capacity_str)
-
-        matched = [room for room in render_context[list_key]
-                   if _room_matches(room, search_date, start_time,
-                                    finish_time, capacity)]
-        render_context.update({
-            list_key: matched,
-            'search_scope': scope,
-            'search_date': search_date,
-            'search_date_value': search_date.strftime('%d/%m/%Y'),
-            'search_start': start_str,
-            'search_finish': finish_str,
-            'search_capacity': capacity,
-            'bookable_count': len(matched),
-        })
+            elif re_time.date() - datetime.now().date() > timedelta(days=6):
+                # 查看了7天之后的
+                wrong("只能查看最近7天的情况!", render_context)
+                return render(request, 'Appointment/index.html', render_context)
+            # #974: 日期搜索直接展示当天可预约的地下室，而非跳转
+            search_date = re_time.date()
+            all_rooms = list(function_room_list) + list(talk_room_list) + list(russian_room_list)
+            bookable = {r.Rid for r in all_rooms if _room_has_free_slot(r, search_date)}
+            function_room_list = [r for r in function_room_list if r.Rid in bookable]
+            talk_room_list = [r for r in talk_room_list if r.Rid in bookable]
+            russian_room_list = [r for r in russian_room_list if r.Rid in bookable]
+            russ_len = len(russian_room_list)
+            render_context.update(
+                search_date=search_date,
+                bookable_count=len(bookable),
+                function_room_list=function_room_list,
+                talk_room_list=talk_room_list,
+                russian_room_list=russian_room_list,
+                russ_len=russ_len,
+            )
+            return render(request, 'Appointment/index.html', render_context)
 
     return render(request, 'Appointment/index.html', render_context)
 
