@@ -304,6 +304,30 @@ def _room_has_free_slot(room, search_date):
 
 
 @identity_check(redirect_field_name='origin', auth_func=lambda x: True)
+def _room_has_free_slot(room, search_date):
+    """#974: 判断房间在指定日期是否仍有可预约空位（任一30分钟时间块空闲即算）。"""
+    if room.Rstatus == Room.Status.FORBIDDEN:
+        return False
+    max_stamp_id = web_func.get_time_id(room, room.Rfinish, mode="leftopen")
+    if max_stamp_id < 0:
+        return False
+    booked = set()
+    appoints = Appoint.objects.not_canceled().filter(
+        Room_id=room.Rid,
+        Afinish__gte=search_date,
+        Astart__date__lt=search_date + timedelta(days=1),
+    )
+    for appoint in appoints:
+        for i in web_func.timerange2idlist(room.Rid, appoint.Astart, appoint.Afinish, max_stamp_id):
+            booked.add(i)
+    start_id = 0
+    if search_date == datetime.now().date():
+        start_id = max(start_id, web_func.get_time_id(room, datetime.now().time()))
+    for i in range(start_id, max_stamp_id + 1):
+        if i not in booked:
+            return True
+    return False
+
 def index(request):  # 主页
     render_context = {}
     render_context.update(

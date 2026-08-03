@@ -51,24 +51,11 @@
 				content: "\f067"; 
 			}
 		
-		/* #974: 一键展开后改为无图紧凑网格，手机上一屏可见更多房间，无需反复横滑 */
-		.doctor-slider.expanded { display: -webkit-box; display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap; -webkit-box-pack: center; -ms-flex-pack: center; justify-content: center; }
-		.doctor-slider.expanded .slick-list, .doctor-slider.expanded .slick-track { transform: none !important; width: 100% !important; height: auto !important; overflow: visible !important; }
+		.doctor-slider.expanded { display: -webkit-box; display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap; }
+		.doctor-slider.expanded .slick-list { overflow: visible !important; height: auto !important; }
+		.doctor-slider.expanded .slick-track { transform: none !important; width: 100% !important; display: -webkit-box; display: -ms-flexbox; display: flex; -ms-flex-wrap: wrap; flex-wrap: wrap; }
 		.doctor-slider.expanded .slick-slide { width: auto !important; float: none !important; height: auto !important; }
-		.doctor-slider.expanded .doc-img { display: none; }
-		.doctor-slider.expanded .profile-widget { width: calc(50% - 12px); margin: 6px; padding: 10px; }
-		.doctor-slider.expanded .pro-content .title { font-size: 15px; margin-bottom: 4px; }
-		.doctor-slider.expanded .available-info { font-size: 12px; margin-bottom: 6px; }
-		.doctor-slider.expanded .available-info li { margin-bottom: 2px; }
-		.doctor-slider.expanded .book-btn { padding: 4px 0; font-size: 13px; }
-		@media (min-width: 576px) { .doctor-slider.expanded .profile-widget { width: calc(33.3333% - 12px); } }
-		@media (min-width: 992px) { .doctor-slider.expanded .profile-widget { width: calc(20% - 12px); } }
-		@media (min-width: 1400px) { .doctor-slider.expanded .profile-widget { width: calc(12.5% - 12px); } }
-		/* #974: 区块工具条——居中的快速查找框与一键展开按钮 */
-		.room-toolbar { margin-top: 14px; margin-bottom: 18px; }
-		.room-toolbar .room-quick-filter { max-width: 280px; margin: 0 auto 12px; text-align: center; }
-		.room-toolbar .room-expand-btn { display: inline-block; min-width: 120px; }
-		.room-search { max-width: 940px; margin: 0 auto 6px; }
+		.doctor-slider.expanded .profile-widget { margin: 8px; }
 		</style>
 		{% endblock %}
 	
@@ -258,6 +245,12 @@
 		  
 
 			
+			{% if search_date %}
+			<div class="alert alert-info text-center">
+			已按日期 <b>{{ search_date|date:"Y年n月j日" }}</b> 筛选：当天可预约的地下室共 <b>{{ bookable_count }}</b> 间
+			<a href="index" class="alert-link">清除筛选</a>
+			</div>
+			{% endif %}
 			<!-- 功能房预约 -->
 			<section class="section section-doctor" >
 				<div class="container-fluid" >
@@ -265,15 +258,8 @@
 					<div class="col-lg-4">-->
 							<div class="section-header text-center">
 								<h2>功能房预约</h2>
+						<button type="button" class="btn btn-outline-primary btn-sm ml-2" onclick="toggleRoomExpand(this)">一键展开</button>
 								
-							</div>
-							{% include "Appointment/_room_search.html" with scope="func" date_field="func_request_time" %}
-							<div class="room-toolbar text-center">
-								<input type="text" class="form-control room-quick-filter" autocomplete="off"
-									placeholder="输入房间号或名称快速查找" oninput="quickFilterRooms(this)">
-								<button type="button" class="btn btn-outline-primary btn-sm room-expand-btn"
-									onclick="toggleRoomExpand(this)">一键展开</button>
-								<div class="room-filter-empty text-muted small mt-2" style="display: none;">没有匹配的房间</div>
 							</div>
 							<!--<div class="banner-wrapper">
 								
@@ -335,8 +321,6 @@
 							</div>
 							<!-- /Doctor Widget -->
 					
-						{% empty %}
-						<div class="w-100 text-center text-muted py-4">暂无可预约的房间</div>
 						{% endfor %}	
 						</div>
 						
@@ -353,6 +337,7 @@
 					<div class="col-lg-4">-->
 						<div class="section-header text-center">
 							<h2>研讨室预约</h2>
+						<button type="button" class="btn btn-outline-primary btn-sm ml-2" onclick="toggleRoomExpand(this)">一键展开</button>
 							
 						</div>
 						<div class="banner-wrapper">
@@ -360,14 +345,31 @@
 								<h3></h3>
 							</div>
 							-->
-							{% include "Appointment/_room_search.html" with scope="talk" date_field="request_time" %}
-							<div class="room-toolbar text-center">
-								<input type="text" class="form-control room-quick-filter" autocomplete="off"
-									placeholder="输入房间号或名称快速查找" oninput="quickFilterRooms(this)">
-								<button type="button" class="btn btn-outline-primary btn-sm room-expand-btn"
-									onclick="toggleRoomExpand(this)">一键展开</button>
-								<div class="room-filter-empty text-muted small mt-2" style="display: none;">没有匹配的房间</div>
+							<!-- Search -->
+							<div class="search-box">
+								<form method="POST">
+									{% csrf_token %}
+									<!--
+									<div class="form-group search-location">
+										<input type="text" class="form-control" placeholder="Search Location">
+										<span class="form-text">Based on your Location</span>
+									</div>
+									-->
+									<div class="row" style="margin: 0 auto">
+									<div class="form search-info" >
+										<div class="cal-icon">
+											<input type="text" class="form-control datetimepicker" placeholder="选择预约日期" name="request_time">
+										</div>	
+										<!--<input type="text" class="form-control " name="request_time" value="{{nowtime}}">
+										-->
+										<!--<span class="form-text">查看对应时间的空闲房间</span>-->
+										
+									</div>
+									<button type="submit" class="btn btn-primary search-btn"><i class="fas fa-search"></i> <span>Search</span></button>
+								</div>
+								</form>
 							</div>
+							<!-- /Search -->
 							
 						
 						</div>
@@ -426,8 +428,6 @@
 							</div>
 							<!-- /Doctor Widget -->
 					
-						{% empty %}
-						<div class="w-100 text-center text-muted py-4">暂无可预约的房间</div>
 						{% endfor %}	
 						</div>
 							
@@ -445,6 +445,7 @@
 						<div class="col-lg-4">-->
 								<div class="section-header text-center">
 									<h2>俄文楼预约</h2>
+						<button type="button" class="btn btn-outline-primary btn-sm ml-2" onclick="toggleRoomExpand(this)">一键展开</button>
 									<p>个人面试 / 线上授课</p>
 								</div>
 								<!--<div class="banner-wrapper">
@@ -461,14 +462,29 @@
 								<a href="javascript:;">Read More..</a>
 							</div>
 							-->
-						{% include "Appointment/_room_search.html" with scope="russ" date_field="russ_request_time" %}
-						<div class="room-toolbar text-center">
-							<input type="text" class="form-control room-quick-filter" autocomplete="off"
-								placeholder="输入房间号或名称快速查找" oninput="quickFilterRooms(this)">
-							<button type="button" class="btn btn-outline-primary btn-sm room-expand-btn"
-								onclick="toggleRoomExpand(this)">一键展开</button>
-							<div class="room-filter-empty text-muted small mt-2" style="display: none;">没有匹配的房间</div>
+						<!-- Search -->
+						<div class="search-box">
+							<form method="POST">
+								{% csrf_token %}
+								<!--
+								<div class="form-group search-location">
+									<input type="text" class="form-control" placeholder="Search Location">
+									<span class="form-text">Based on your Location</span>
+								</div>
+								-->
+								<div class="row" style="margin: 0 auto">
+								<div class="form search-info" >
+									<div class="cal-icon">
+										<input type="text" class="form-control datetimepicker" placeholder="选择预约日期" name="russ_request_time">
+									</div>	
+									<!--<span class="form-text">查看对应时间的空闲房间</span>-->
+									
+								</div>
+								<button type="submit" class="btn btn-primary search-btn"><i class="fas fa-search"></i> <span>Search</span></button>
+							</div>
+							</form>
 						</div>
+						<!-- /Search -->
 						<!--</div>
 						<div class="col-lg-8">-->
 							<div class="doctor-slider slider" >
@@ -515,8 +531,6 @@
 								</div>
 								<!-- /Doctor Widget -->
 						
-							{% empty %}
-							<div class="w-100 text-center text-muted py-4">暂无可预约的房间</div>
 							{% endfor %}	
 							</div>
 							
@@ -596,58 +610,21 @@
 		
 	
 		<script type="text/javascript">
-			// #974: 展开为无图网格 + 输入即时筛选，避免在手机上反复横向滑动找房间
-			function expandRoomSlider($slider) {
-				if ($slider.data("expanded")) { return; }
-				if ($slider.hasClass("slick-initialized")) {
-					$slider.slick("unslick");
+				function toggleRoomExpand(btn) {
+					var $section = $(btn).closest("section");
+					var $slider = $section.find(".doctor-slider");
+					if (!$slider.data("expanded")) {
+						$slider.slick("unslick");
+						$slider.addClass("expanded");
+						$slider.data("expanded", true);
+						$(btn).text("收起");
+					} else {
+						$slider.removeClass("expanded");
+						$slider.slick({ dots: false, autoplay: false, infinite: true, variableWidth: true });
+						$slider.data("expanded", false);
+						$(btn).text("一键展开");
+					}
 				}
-				$slider.addClass("expanded");
-				$slider.data("expanded", true);
-			}
-
-			function collapseRoomSlider($slider) {
-				if (!$slider.data("expanded")) { return; }
-				$slider.removeClass("expanded");
-				$slider.slick({ dots: false, autoplay: false, infinite: true, variableWidth: true });
-				$slider.data("expanded", false);
-			}
-
-			function filterRoomCards($section, keyword) {
-				var kw = $.trim(keyword).toLowerCase();
-				var matched = 0;
-				$section.find(".profile-widget").each(function () {
-					var hit = (kw === "" || $(this).text().toLowerCase().indexOf(kw) !== -1);
-					$(this).toggle(hit);
-					if (hit) { matched += 1; }
-				});
-				$section.find(".room-filter-empty").toggle(matched === 0 && kw !== "");
-			}
-
-			function toggleRoomExpand(btn) {
-				var $section = $(btn).closest("section");
-				var $slider = $section.find(".doctor-slider");
-				if (!$slider.data("expanded")) {
-					expandRoomSlider($slider);
-					$(btn).text("收起");
-				} else {
-					$section.find(".room-quick-filter").val("");
-					filterRoomCards($section, "");
-					collapseRoomSlider($slider);
-					$(btn).text("一键展开");
-				}
-			}
-
-			function quickFilterRooms(input) {
-				var $section = $(input).closest("section");
-				var $slider = $section.find(".doctor-slider");
-				if ($.trim(input.value) !== "") {
-					// 轮播模式下隐藏卡片会错位，输入时自动切换为网格
-					expandRoomSlider($slider);
-					$section.find(".room-expand-btn").text("收起");
-				}
-				filterRoomCards($section, input.value);
-			}
 		</script>
 	</body>
 </html>
