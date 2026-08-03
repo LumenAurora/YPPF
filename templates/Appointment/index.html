@@ -648,6 +648,51 @@
 				}
 				filterRoomCards($section, input.value);
 			}
-		</script>
+		
+	function escapeHtml(s) {
+		return $('<div>').text(s).html();
+	}
+
+	function doRoomSearch(form) {
+		var $form = $(form);
+		var $section = $form.closest("section");
+		var $slider = $section.find(".doctor-slider");
+		// 搜索即展开为网格，便于直接看到过滤结果
+		expandRoomSlider($slider);
+		$section.find(".room-expand-btn").text("收起");
+		var fd = new FormData(form);
+		fetch(window.location.pathname, {
+			method: "POST",
+			headers: { "X-Requested-With": "XMLHttpRequest" },
+			body: fd,
+			credentials: "same-origin"
+		})
+		.then(function (resp) { return resp.json(); })
+		.then(function (data) {
+			if (data.error) {
+				$section.find(".room-search-banner").html(
+					'<div class="alert alert-warning text-center py-2">' + escapeHtml(data.error) + '</div>');
+				return;
+			}
+			$slider.html(data.cards_html);
+			$section.find(".room-search-banner").html(data.banner_html);
+			var kw = $section.find(".room-quick-filter").val();
+			if (kw) { filterRoomCards($section, kw); }
+		})
+		.catch(function (err) { console.error("地下室搜索失败", err); });
+	}
+
+	function submitRoomSearch(form, e) {
+		if (e && e.preventDefault) { e.preventDefault(); }
+		doRoomSearch(form);
+		return false;
+	}
+
+	function clearRoomSearch(btn) {
+		var $form = $(btn).closest("form");
+		$form[0].reset();
+		doRoomSearch($form[0]);
+	}
+</script>
 	</body>
 </html>

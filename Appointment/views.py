@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, date
 
 from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect
+from django.http import JsonResponse
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.contrib import auth
 from django.db.models import QuerySet
@@ -415,16 +417,23 @@ def index(request):  # 主页
     )
 
     if request.method == "POST":
-        # #974: 三个区块的搜索彼此独立，由search_scope决定只筛选哪一个列表
+        # #974: 三个区块的搜索彼此独立，由search_scope决定只筛选哪一个列表；提交走AJAX原地刷新
+        is_ajax = request.headers.get('x-requested-with') == 'XMLHttpRequest'
+
+        def _reject(msg):
+            if is_ajax:
+                return JsonResponse({'error': msg})
+            wrong(msg, render_context)
+            return render(request, 'Appointment/index.html', render_context)
+
         scope = request.POST.get('search_scope', '')
         if scope not in _SEARCH_SCOPES:
-            # 兼容未携带search_scope的旧表单：按日期字段名推断区块
             for guess, (guess_field, _) in _SEARCH_SCOPES.items():
                 if request.POST.get(guess_field) is not None:
                     scope = guess
                     break
         if scope not in _SEARCH_SCOPES:
-            return render(request, 'Appointment/index.html', render_context)
+            return _reject('搜索范围无效')
 
         date_field, list_key = _SEARCH_SCOPES[scope]
         date_str = (request.POST.get(date_field) or '').strip()
@@ -432,43 +441,57 @@ def index(request):  # 主页
         finish_str = (request.POST.get('finish_time') or '').strip()
         capacity_str = (request.POST.get('capacity') or '').strip()
         if not any([date_str, start_str, finish_str, capacity_str]):
-            # 什么条件都没填，等同于不筛选
+            if is_ajax:
+                cards_html = render_to_string(
+                    'Appointment/_room_cards.html', {'rooms': render_context[list_key]})
+                return JsonResponse({'cards_html': cards_html, 'banner_html': '', 'bookable_count': len(render_context[list_key]), 'scope': scope})
             return render(request, 'Appointment/index.html', render_context)
 
         today = datetime.now().date()
         if date_str:
             search_date = _parse_search_date(date_str)
             if search_date is None:
-                wrong('日期格式不正确，请重新选择!', render_context)
-                return render(request, 'Appointment/index.html', render_context)
+                return _reject('日期格式不正确，请重新选择!')
         else:
-            search_date = today                 # 只填时段或人数时默认查询当天
+            search_date = today
         if search_date < today:
-            wrong('请不要搜索已经过去的时间!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
+            return _reject('请不要搜索已经过去的时间!')
         if search_date - today > timedelta(days=6):
-            wrong('只能查看最近7天的情况!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
+            return _reject('只能查看最近7天的情况!')
 
         start_time = _parse_search_time(start_str) if start_str else None
         finish_time = _parse_search_time(finish_str) if finish_str else None
         if (start_str and start_time is None) or (finish_str and finish_time is None):
-            wrong('时段格式不正确，请重新选择!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
+            return _reject('时段格式不正确，请重新选择!')
         if start_time is not None and finish_time is not None and start_time >= finish_time:
-            wrong('时段的开始时间应早于结束时间!', render_context)
-            return render(request, 'Appointment/index.html', render_context)
+            return _reject('时段的开始时间应早于结束时间!')
 
         capacity = None
         if capacity_str:
             if not capacity_str.isdigit() or int(capacity_str) <= 0:
-                wrong('请输入正确的使用人数!', render_context)
-                return render(request, 'Appointment/index.html', render_context)
+                return _reject('请输入正确的使用人数!')
             capacity = int(capacity_str)
 
         matched = [room for room in render_context[list_key]
                    if _room_matches(room, search_date, start_time,
                                     finish_time, capacity)]
+        if is_ajax:
+            cards_html = render_to_string(
+                'Appointment/_room_cards.html', {'rooms': matched})
+            banner_html = render_to_string(
+                'Appointment/_room_search_banner.html', {
+                    'search_date': search_date,
+                    'search_start': start_str,
+                    'search_finish': finish_str,
+                    'search_capacity': capacity,
+                    'bookable_count': len(matched),
+                })
+            return JsonResponse({
+                'cards_html': cards_html,
+                'banner_html': banner_html,
+                'bookable_count': len(matched),
+                'scope': scope,
+            })
         render_context.update({
             list_key: matched,
             'search_scope': scope,
