@@ -2,9 +2,10 @@ import json
 import html
 from datetime import datetime, timedelta, date
 
-from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect
+from django.http import JsonResponse
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.contrib import auth
 from django.db.models import QuerySet
@@ -279,6 +280,79 @@ def credit(request):
     return render(request, 'Appointment/admin-credit.html', render_context)
 
 
+# #974: 三个区块的搜索互相独立，scope -> (日期字段名, 房间列表的上下文变量名)
+_SEARCH_SCOPES = {
+    'func': ('func_request_time', 'function_room_list'),
+    'talk': ('request_time', 'talk_room_list'),
+    'russ': ('russ_request_time', 'russian_room_list'),
+}
+
+
+def _parse_search_date(date_str: str):
+    """#974: 解析搜索日期，兼容DD/MM/YYYY与DD-MM-YYYY两种分隔符。"""
+    try:
+        return datetime.strptime(date_str.strip().replace('/', '-'), '%d-%m-%Y').date()
+    except ValueError:
+        return None
+
+
+def _parse_search_time(time_str: str):
+    """#974: 解析搜索时段中的时间，接受HH:MM或HH:MM:SS。"""
+    for fmt in ('%H:%M', '%H:%M:%S'):
+        try:
+            return datetime.strptime(time_str.strip(), fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def _room_matches(room: Room, search_date: date, start_time=None,
+                  finish_time=None, capacity=None) -> bool:
+    """#974: 判断房间是否满足搜索条件。
+
+    - 人数：需落在房间的[Rmin, Rmax]区间内；
+    - 未指定时段：当天任意30分钟时间块空闲即视为可预约；
+    - 指定时段：该时段覆盖的时间块必须全部空闲。
+    """
+    if room.Rstatus == Room.Status.FORBIDDEN:
+        return False
+    if capacity is not None and not room.Rmin <= capacity <= room.Rmax:
+        return False
+    max_stamp_id = web_func.get_time_id(room, room.Rfinish, mode='leftopen')
+    if max_stamp_id < 0:
+        return False
+    exact_range = start_time is not None or finish_time is not None
+    left_id, right_id = 0, max_stamp_id
+    if start_time is not None:
+        left_id = max(left_id, web_func.get_time_id(room, start_time))
+    if finish_time is not None:
+        right_id = min(right_id, web_func.get_time_id(
+            room, finish_time, mode='leftopen'))
+    if search_date == datetime.now().date():
+        now_id = web_func.get_time_id(room, datetime.now().time())
+        if exact_range and now_id > left_id:
+            return False                    # 指定时段已经开始，无法完整预约
+        left_id = max(left_id, now_id)
+    if right_id < left_id:
+        return False
+    booked = set()
+    appoints = Appoint.objects.not_canceled().filter(
+        Room_id=room.Rid,
+        Afinish__gte=search_date,
+        Astart__date__lt=search_date + timedelta(days=1),
+    )
+    for appoint in appoints:
+        booked.update(web_func.timerange2idlist(
+            room.Rid, appoint.Astart, appoint.Afinish, max_stamp_id))
+    for stamp_id in range(left_id, right_id + 1):
+        if stamp_id in booked:
+            if exact_range:
+                return False
+        elif not exact_range:
+            return True
+    return exact_range
+
+
 @identity_check(redirect_field_name='origin', auth_func=lambda x: True)
 def index(request):  # 主页
     render_context = {}
@@ -343,38 +417,91 @@ def index(request):  # 主页
     )
 
     if request.method == "POST":
+        # #974: 三个区块的搜索彼此独立，由search_scope决定只筛选哪一个列表；提交走AJAX原地刷新
+        is_ajax = request.headers.get('x-requested-with') == 'XMLHttpRequest'
 
-        # YHT: added for Russian search
-        request_time = request.POST.get("request_time", None)
-        russ_request_time = request.POST.get("russ_request_time", None)
-        check_type = ""
-        if request_time is None and russ_request_time is not None:
-            check_type = "russ"
-            request_time = russ_request_time
-        elif request_time is not None and russ_request_time is None:
-            check_type = "talk"
-        else:
+        def _reject(msg):
+            if is_ajax:
+                return JsonResponse({'error': msg})
+            wrong(msg, render_context)
             return render(request, 'Appointment/index.html', render_context)
 
-        if request_time != None and request_time != "":  # 初始加载或者不选时间直接搜索则直接返回index页面，否则进行如下反查时间
-            day, month, year = int(request_time[:2]), int(
-                request_time[3:5]), int(request_time[6:10])
-            re_time = datetime(year, month, day)  # 获取目前request时间的datetime结构
-            if re_time.date() < datetime.now().date():  # 如果搜过去时间
-                render_context.update(search_code=1,
-                                      search_message="请不要搜索已经过去的时间!")
-                return render(request, 'Appointment/index.html', render_context)
-            elif re_time.date() - datetime.now().date() > timedelta(days=6):
-                # 查看了7天之后的
-                render_context.update(search_code=1,
-                                      search_message="只能查看最近7天的情况!")
-                return render(request, 'Appointment/index.html', render_context)
-            # 到这里 搜索没问题 进行跳转
-            urls = my_messages.append_query(
-                reverse("Appointment:arrange_talk"),
-                year=year, month=month, day=day, type=check_type)
-            # YHT: added for Russian search
-            return redirect(urls)
+        scope = request.POST.get('search_scope', '')
+        if scope not in _SEARCH_SCOPES:
+            for guess, (guess_field, _) in _SEARCH_SCOPES.items():
+                if request.POST.get(guess_field) is not None:
+                    scope = guess
+                    break
+        if scope not in _SEARCH_SCOPES:
+            return _reject('搜索范围无效')
+
+        date_field, list_key = _SEARCH_SCOPES[scope]
+        date_str = (request.POST.get(date_field) or '').strip()
+        start_str = (request.POST.get('start_time') or '').strip()
+        finish_str = (request.POST.get('finish_time') or '').strip()
+        capacity_str = (request.POST.get('capacity') or '').strip()
+        if not any([date_str, start_str, finish_str, capacity_str]):
+            if is_ajax:
+                cards_html = render_to_string(
+                    'Appointment/_room_cards.html', {'rooms': render_context[list_key]})
+                return JsonResponse({'cards_html': cards_html, 'banner_html': '', 'bookable_count': len(render_context[list_key]), 'scope': scope})
+            return render(request, 'Appointment/index.html', render_context)
+
+        today = datetime.now().date()
+        if date_str:
+            search_date = _parse_search_date(date_str)
+            if search_date is None:
+                return _reject('日期格式不正确，请重新选择!')
+        else:
+            search_date = today
+        if search_date < today:
+            return _reject('请不要搜索已经过去的时间!')
+        if search_date - today > timedelta(days=6):
+            return _reject('只能查看最近7天的情况!')
+
+        start_time = _parse_search_time(start_str) if start_str else None
+        finish_time = _parse_search_time(finish_str) if finish_str else None
+        if (start_str and start_time is None) or (finish_str and finish_time is None):
+            return _reject('时段格式不正确，请重新选择!')
+        if start_time is not None and finish_time is not None and start_time >= finish_time:
+            return _reject('时段的开始时间应早于结束时间!')
+
+        capacity = None
+        if capacity_str:
+            if not capacity_str.isdigit() or int(capacity_str) <= 0:
+                return _reject('请输入正确的使用人数!')
+            capacity = int(capacity_str)
+
+        matched = [room for room in render_context[list_key]
+                   if _room_matches(room, search_date, start_time,
+                                    finish_time, capacity)]
+        if is_ajax:
+            cards_html = render_to_string(
+                'Appointment/_room_cards.html', {'rooms': matched})
+            banner_html = render_to_string(
+                'Appointment/_room_search_banner.html', {
+                    'search_date': search_date,
+                    'search_start': start_str,
+                    'search_finish': finish_str,
+                    'search_capacity': capacity,
+                    'bookable_count': len(matched),
+                })
+            return JsonResponse({
+                'cards_html': cards_html,
+                'banner_html': banner_html,
+                'bookable_count': len(matched),
+                'scope': scope,
+            })
+        render_context.update({
+            list_key: matched,
+            'search_scope': scope,
+            'search_date': search_date,
+            'search_date_value': search_date.strftime('%d/%m/%Y'),
+            'search_start': start_str,
+            'search_finish': finish_str,
+            'search_capacity': capacity,
+            'bookable_count': len(matched),
+        })
 
     return render(request, 'Appointment/index.html', render_context)
 
@@ -695,66 +822,24 @@ def _get_content_students(contents: dict):
     assert len(students) == len(students_id), '预约人信息有误，请检查后重新发起预约！'
     return students
 
-def _checkout_slot_fields(
-    room: Room, weekday: str, startid: int, endid: int, start_week: int,
-    posted_date: date | None,
-) -> dict:
-    """解析结算页时段。POST 必须携带 GET 时的绝对日期，不得按 weekday 重映射。"""
-    starttime, valid = web_func.get_hour_time(room, startid)
-    assert valid is True
-    endtime, valid = web_func.get_hour_time(room, endid + 1)
-    assert valid is True
-    dayrange_list = web_func.get_dayrange(day_offset=0)[0]
-    allowed = {
-        date(day['year'], day['month'], day['day']): day
-        for day in dayrange_list
-    }
-    if posted_date is not None:
-        if wklist[posted_date.weekday()] != weekday:
-            raise ValueError('预约日期与星期不一致，请重新选择时间')
-        if posted_date not in allowed:
-            raise ValueError('预约时段已过期，请重新选择时间')
-        slot_date = posted_date
-        day = allowed[slot_date]
-    else:
-        day = next(
-            (item for item in dayrange_list if item['weekday'] == weekday),
-            None,
-        )
-        if day is None:
-            raise ValueError('预约时段不合法，请重新选择时间')
-        slot_date = date(day['year'], day['month'], day['day'])
-    rmin = room.Rmin
-    if start_week == 0 and datetime.now().date() == slot_date:
-        rmin = min(CONFIG.today_min, room.Rmin)
-    return {
-        'date': day['date'],
-        'starttime': starttime,
-        'endtime': endtime,
-        'year': slot_date.year,
-        'month': slot_date.month,
-        'day': slot_date.day,
-        'Rmin': rmin,
-    }
-
-
-def _add_appoint(
-    contents: dict, start: datetime, finish: datetime, non_yp_num: int,
-    applicant: Participant, type: Appoint.Type = Appoint.Type.NORMAL,
-    notify_create: bool = True,
-) -> tuple[Appoint | None, str]:
+def _add_appoint(contents: dict, start: datetime, finish: datetime, non_yp_num: int,
+               type: Appoint.Type = Appoint.Type.NORMAL,
+               notify_create: bool = True) -> tuple[Appoint | None, str]:
     '''
-    创建一个预约，检查各种条件。
+    创建一个预约，检查各种条件，屎山函数
 
-    发起人必须由调用方传入当前会话对应的 Participant，不得从 contents 读取。
+    :param contents: 屎山，只知道Sid: arg for `get_participant`
+    :type contents: dict
+    :param type: 预约类型, defaults to Appoint.Type.NORMAL
+    :type type: Appoint.Type, optional
+    :param check_contents: 是否检查参数，暂未启用, defaults to True
+    :type check_contents: bool, optional
+    :param notify_create: 是否通知参与者创建了新预约, defaults to True
+    :type notify_create: bool, optional
+    :return: (预约, 错误信息)
+    :rtype: tuple[Appoint | None, str]
     '''
     from Appointment.appoint.manage import _error
-
-    # 在函数边界移除客户端身份字段，避免后续维护时意外将其作为权威来源。
-    # 复制后再清理，防止修改调用方持有的字典。
-    contents = contents.copy()
-    contents.pop('Sid', None)
-    contents.pop('Sname', None)
 
     try:
         room = _get_content_room(contents)
@@ -787,8 +872,13 @@ def _add_appoint(
     except:
         return _error('非法的预约信息！')
 
+    # 获取预约发起者,确认预约状态
+    major_student = get_participant(contents['Sid'])
+    if major_student is None:
+        return _error('发起人信息不存在！')
+
     return create_appoint(
-        appointer=applicant,
+        appointer=major_student,
         students=students,
         room=room, start=start, finish=finish,
         usage=usage, announce=announcement,
@@ -798,14 +888,10 @@ def _add_appoint(
     )
 
 
-@csrf_protect
 @identity_check(redirect_field_name='origin')
 def checkout_appoint(request: UserRequest):
     """
-    结算页：GET 渲染预约表单，POST 创建预约。
-
-    发起人始终为当前登录会话对应的 Participant，忽略表单 Sid/Sname。
-    仅已登录且通过 identity_check（含地下室权限）的账号可写入。
+    提交预约表单，检查合法性，进行预约
     """
     stu_list = []
     json_context = {}
@@ -895,38 +981,27 @@ def checkout_appoint(request: UserRequest):
         'longterm': is_longterm,
         'start_week': start_week,
     }
-    posted_date = None
-    if request.method == 'POST':
-        try:
-            posted_date = date(
-                int(request.POST.get('year')),
-                int(request.POST.get('month')),
-                int(request.POST.get('day')),
-            )
-        except (TypeError, ValueError):
-            redirect_url = (
-                f'/underground/arrange_time?Rid={Rid}'
-                f'&start_week={safe_start_week}'
-            )
-            if is_longterm:
-                redirect_url += '&longterm=on'
-            return redirect(message_url(
-                wrong('预约时段无效，请重新选择时间'), redirect_url,
-            ))
-    try:
-        appoint_params.update(_checkout_slot_fields(
-            room, weekday, startid, endid, start_week,
-            posted_date=posted_date,
-        ))
-    except (AssertionError, ValueError) as exc:
-        redirect_url = (
-            f'/underground/arrange_time?Rid={Rid}'
-            f'&start_week={safe_start_week}'
-        )
-        if is_longterm:
-            redirect_url += '&longterm=on'
-        message = str(exc) if isinstance(exc, ValueError) else '预约时段不合法'
-        return redirect(message_url(wrong(message), redirect_url))
+    # 表单参数都统一为可预约的第一周，具体预约哪周根据POST的start_week判断
+    dayrange_list = web_func.get_dayrange(day_offset=0)[0]
+    for day in dayrange_list:
+        if day['weekday'] == appoint_params['weekday']:
+            appoint_params['date'] = day['date']
+            appoint_params['starttime'], valid = web_func.get_hour_time(
+                room, appoint_params['startid'])
+            assert valid is True
+            appoint_params['endtime'], valid = web_func.get_hour_time(
+                room, appoint_params['endid'] + 1)
+            assert valid is True
+            appoint_params['year'] = day['year']
+            appoint_params['month'] = day['month']
+            appoint_params['day'] = day['day']
+            # 最小人数下限控制
+            appoint_params['Rmin'] = room.Rmin
+            if start_week == 0 and datetime.now().strftime(
+                    "%a") == appoint_params['weekday']:
+                appoint_params['Rmin'] = min(CONFIG.today_min,
+                                             room.Rmin)
+            break
     appoint_params['Sid'] = applicant.get_id()
     appoint_params['Sname'] = applicant.name
 
@@ -959,9 +1034,6 @@ def checkout_appoint(request: UserRequest):
                 contents[key] = contents[key][0]
                 if key in {'year', 'month', 'day'}:
                     contents[key] = int(contents[key])
-        # 发起人只绑定当前会话，忽略客户端提交的身份字段
-        contents.pop('Sid', None)
-        contents.pop('Sname', None)
         # 处理外院人数
         if contents['non_yp_num'] == "":
             contents['non_yp_num'] = 0
@@ -973,12 +1045,11 @@ def checkout_appoint(request: UserRequest):
         # 检查是否未填写房间用途
         if not contents['Ausage']:
             wrong("请输入房间用途!", render_context)
-        # 处理单人预约：参与人必须包含当前会话用户
-        applicant_id = applicant.get_id()
+        # 处理单人预约
         if "students" not in contents.keys():
-            contents['students'] = [applicant_id]
+            contents['students'] = [contents['Sid']]
         else:
-            contents['students'].append(applicant_id)
+            contents['students'].append(contents['Sid'])
         
         # 不允许用非活跃用户凑数
         # 虽然在生成搜索列表时已经排除了非活跃用户，但这里再检查一次，以防万一
@@ -1028,16 +1099,10 @@ def checkout_appoint(request: UserRequest):
         if not applicant.Sid.active:
             wrong('您已毕业，不能预约地下室', render_context)
 
-        start_time = datetime(
-            appoint_params['year'], appoint_params['month'],
-            appoint_params['day'],
-            *map(int, appoint_params['starttime'].split(':')),
-        )
-        end_time = datetime(
-            appoint_params['year'], appoint_params['month'],
-            appoint_params['day'],
-            *map(int, appoint_params['endtime'].split(':')),
-        )
+        start_time = datetime(contents['year'], contents['month'], contents['day'],
+                              *map(int, contents['starttime'].split(":")))
+        end_time = datetime(contents['year'], contents['month'], contents['day'],
+                            *map(int, contents['endtime'].split(":")))
         # TODO: 隔周预约的处理可优化，根据start_week调整实际预约时间
         start_time += timedelta(weeks=start_week)
         end_time += timedelta(weeks=start_week)
@@ -1070,10 +1135,8 @@ def checkout_appoint(request: UserRequest):
                 _notify = False
             elif is_interview:
                 appoint_type = Appoint.Type.INTERVIEW
-            response = _add_appoint(
-                contents, start_time, end_time, non_yp_num=non_yp_num,
-                applicant=applicant, type=appoint_type,
-                notify_create=_notify)
+            response = _add_appoint(contents, start_time, end_time, non_yp_num=non_yp_num,
+                                    type=appoint_type, notify_create=_notify)
             appoint, err_msg = response
             if appoint is not None and not is_longterm:
                 # 成功预约且非长期
