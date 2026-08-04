@@ -60,4 +60,33 @@ def do_checkin(person: NaturalPerson, aid: int) -> tuple[bool, str]:
             participant.save()
             return True, "签到成功!"
     except Participation.DoesNotExist:
+        # 书院课补选同学：活动发布时按当时名单建 Participation，补选后可能缺失，
+        # 此处惰性补建后再签到(issue #973-2)。
+        if (activity.category == Activity.ActivityCategory.COURSE
+                and activity.course_time is not None):
+            from app.models import Course, CourseParticipant
+            course = activity.course_time.course
+            if CourseParticipant.objects.filter(
+                    course=course, person=person,
+                    status=CourseParticipant.Status.SUCCESS).exists():
+                initial = (Participation.AttendStatus.UNATTENDED
+                           if activity.status == Activity.Status.PROGRESSING
+                           else Participation.AttendStatus.APPLYSUCCESS)
+                participation, created = Participation.objects.get_or_create(
+                    activity=activity, person=person,
+                    defaults={'status': initial})
+                if (not created
+                        and participation.status
+                        == Participation.AttendStatus.CANCELED):
+                    participation.status = initial
+                    participation.save(update_fields=['status'])
+                if (activity.status == Activity.Status.PROGRESSING
+                        or (activity.status == Activity.Status.WAITING
+                            and datetime.now() + timedelta(hours=1)
+                            >= activity.start)):
+                    Participation.objects.filter(
+                        activity=activity, person=person).update(
+                        status=Participation.AttendStatus.ATTENDED)
+                    return True, "签到成功!"
+                return False, "活动开始前一小时开放签到，请耐心等待!"
         return False, "您尚未报名该活动!"
