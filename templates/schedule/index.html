@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block add_css_file %}
+<link rel="stylesheet" href="{% static 'plugins/fullcalendar/fullcalendar.min.css' %}">
+{% endblock %}
+
+{% block mainpage %}
+<div class="layout-px-spacing">
+    <div class="row layout-top-spacing">
+        <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
+            <div class="widget widget-chart-one">
+                <div class="widget-heading">
+                    <h5 class="">我的日程表</h5>
+                </div>
+                <div class="widget-content">
+                    <div class="mb-3">
+                        <span class="badge" style="background-color:#4361ee;color:#fff;">书院课程</span>
+                        <span class="badge" style="background-color:#8ba3f0;color:#fff;">课表（未发布）</span>
+                        <span class="badge" style="background-color:#2ecc71;color:#fff;">报名活动</span>
+                        <span class="badge" style="background-color:#f39c12;color:#fff;">地下室预约</span>
+                        {% if html_display.warn_message %}
+                        <span class="badge badge-warning">{{ html_display.warn_message }}</span>
+                        {% endif %}
+                    </div>
+                    <div id="calendar" style="min-height: 600px;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{ schedule_events|json_script:"schedule-events" }}
+{% endblock %}
+
+{% block add_js_file %}
+<script src="{% static 'plugins/fullcalendar/fullcalendar.min.js' %}"></script>
+<script>
+$(document).ready(function () {
+    var raw = document.getElementById('schedule-events').textContent;
+    var events = raw ? JSON.parse(raw) : [];
+    $('#calendar').fullCalendar({
+        header: {
+            left: 'prev,next today',
+            center: 'title',
+            right: 'month,agendaWeek,agendaDay'
+        },
+        defaultView: 'agendaWeek',
+        editable: false,
+        eventLimit: true,
+        timeFormat: 'HH:mm',
+        axisFormat: 'HH:mm',
+        monthNames: ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'],
+        monthNamesShort: ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
+        dayNames: ['周日','周一','周二','周三','周四','周五','周六'],
+        dayNamesShort: ['日','一','二','三','四','五','六'],
+        titleFormat: { month: 'YYYY年M月', week: 'YYYY年M月D日', day: 'YYYY年M月D日' },
+        buttonText: { today: '今天', month: '月', week: '周', day: '日' },
+        events: events,
+        eventRender: function (calEvent, element) {
+            var tip = calEvent.category || '';
+            if (calEvent.location) {
+                tip += ' | 地点：' + calEvent.location;
+            }
+            element.attr('title', tip);
+        },
+        eventClick: function (calEvent) {
+            if (calEvent.url) {
+                window.open(calEvent.url, '_blank');
+                return false;
+            }
+        }
+    });
+});
+</script>
+{% endblock %}
