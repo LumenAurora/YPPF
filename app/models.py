@@ -1413,6 +1413,9 @@ class ModifyPosition(CommentBase):
             Position.objects.activated().filter(
                 org=self.org, person=self.person
             ).update(status=Position.Status.DEPART)
+            # 离开小组后自动退订该小组(加入不订阅名单)
+            if self.org.otype.allow_unsubscribe:
+                self.person.unsubscribe_list.add(self.org)
         elif self.apply_type == ModifyPosition.ApplyType.JOIN:
             # 尝试获取已有的position
             current_positions = Position.objects.current().filter(
@@ -1432,6 +1435,11 @@ class ModifyPosition(CommentBase):
                     is_admin=self.org.otype.default_is_admin(self.pos),
                     semester=self.org.otype.default_semester(),
                 )
+            # 加入小组后自动订阅该小组(从该人不订阅名单中移除)
+            if self.org.otype.allow_unsubscribe:
+                unsub = self.person.unsubscribe_list
+                if unsub.filter(id=self.org.id).exists():
+                    unsub.remove(self.org)
         else:   # 修改 则必定存在这个量
             Position.objects.activated().filter(
                 org=self.org, person=self.person).update(

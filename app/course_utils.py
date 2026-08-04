@@ -43,6 +43,7 @@ from app.activity_utils import (
 )
 from app.extern.wechat import WechatApp, WechatMessageLevel
 from app.log import logger
+from app.org_utils import subscribe_org
 
 import openpyxl
 import openpyxl.worksheet.worksheet
@@ -952,6 +953,8 @@ def change_course_status(cur_status: Course.Status, to_status: Course.Status) ->
                                             semester=GLOBAL_CONFIG.semester)
 
                         positions.append(position)
+                    # 选课成功即视为加入课程组织，自动订阅该组织通知
+                    subscribe_org(participant.person, organization)
                 if positions:
                     with transaction.atomic():
                         Position.objects.bulk_create(positions)
