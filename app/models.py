@@ -2147,3 +2147,57 @@ class AcademicCourse(models.Model):
 
     def __str__(self):
         return f'{self.name}（{self.get_day_of_week_display()} {self.start_section}-{self.end_section}节）'
+
+
+class UserSchedule(models.Model):
+    """同学手动添加的日程/待办（日程表第5数据源）。
+
+    单一模型用 category 区分「日程 / 待办」：
+    - 日程(SCHEDULE)：有具体日期与可选起止时间，显示在 FullCalendar 日历上。
+    - 待办(TODO)：有截止日期，显示在「当日待办」面板，不进日历。
+    重复项在创建时按 repeat_end 实体化为多条独立行并共享 series_id，
+    每条可单独编辑/删除，待办的「完成」状态也各自独立。
+    """
+
+    class Category(models.IntegerChoices):
+        SCHEDULE = 1, '日程'
+        TODO = 2, '待办'
+
+    class Repeat(models.IntegerChoices):
+        NONE = 0, '不重复'
+        DAILY = 1, '每天'
+        WEEKLY = 2, '每周'
+
+    # 实体化时的次数上限，避免误填超大区间产生海量行
+    MAX_OCCURRENCES = 730
+
+    person = models.ForeignKey(
+        NaturalPerson, on_delete=models.CASCADE,
+        related_name='schedules', verbose_name='所属同学')
+    title = models.CharField('标题', max_length=100)
+    category = models.IntegerField(
+        '类型', choices=Category.choices, default=Category.SCHEDULE)
+    date = models.DateField('日期')
+    start_time = models.TimeField('开始时间', null=True, blank=True)
+    end_time = models.TimeField('结束时间', null=True, blank=True)
+    location = models.CharField('地点', max_length=100, blank=True, default='')
+    note = models.CharField('备注', max_length=300, blank=True, default='')
+    color = models.CharField('颜色', max_length=7, default='#16a085')
+    done = models.BooleanField('已完成', default=False)
+    repeat = models.IntegerField(
+        '重复', choices=Repeat.choices, default=Repeat.NONE)
+    repeat_end = models.DateField('重复结束日期', null=True, blank=True)
+    series_id = models.CharField('系列标识', max_length=32, blank=True, default='')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '手动日程'
+        verbose_name_plural = '手动日程'
+        ordering = ['date', 'start_time', 'id']
+
+    def __str__(self):
+        return f'{self.title}（{self.get_category_display()} {self.date}）'
+
+    @property
+    def is_recurring(self) -> bool:
+        return self.repeat != UserSchedule.Repeat.NONE
