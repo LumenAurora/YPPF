@@ -29,6 +29,43 @@ vscode ➜ /workspace
 
 At this point, the devcontainer is equivalent to a configured Python environment, and MySQL does not need to be configured by yourself.
 
+On container **create or rebuild**, setup automatically:
+
+1. Creates a Compose-default `config.json` when missing (`yppf` / host `mysql` / password `secret`)
+2. **Ensures** the development database is usable (see below)
+3. Installs optional Dev Container packages (`.devcontainer/dev_requirements.txt`, postCreate only)
+
+`postCreateCommand` / `postStartCommand` call `scripts/devcontainer_ensure_db.sh`:
+
+- **Populated database:** keep existing data (no DROP / no sample re-import);
+  run `migrate` only
+- **Empty database:** `migrate` → import [`dev_sample.sql`](../../../dev_sample.sql)
+- Superuser is **not** created automatically
+
+> **Note:** Creating/rebuilding the container **keeps** existing `yppf` data in
+> the Compose MySQL volume by default. To wipe and reload the sample dump,
+> run manually inside the container:
+> `bash scripts/devcontainer_reset_sample_db.sh`
+> The same reset is required after `git pull` updates `dev_sample.sql`, because
+> `ensure_db` will not re-import into a populated volume.
+> Host-only `docker compose ... up --build` does **not** run these hooks.
+> After changing the dump, run
+> `python manage.py test dm.test.test_sample_sql_integrity`.
+
+Useful commands inside the Dev Container:
+
+```shell
+python manage.py runserver 0.0.0.0:8000
+python scripts/create_dev_superuser.py   # optional; default admin/secret
+# or: python manage.py createsuperuser
+python manage.py migrate --noinput
+bash scripts/devcontainer_reset_sample_db.sh
+```
+
+All sample account passwords are `test` (usernames like `S000001` / `P000001` / `O000001`).
+
+For manual re-import, reset, or regenerating the sample dump, see the Chinese README section [样例数据库](../../../README.md#样例数据库).
+
 ### Build Local Environment
 
 1. Install Python and start the terminal in the project root directory

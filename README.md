@@ -28,6 +28,186 @@ vscode ➜ /workspace
 
 至此，devcontainer 中相当于一个配置好的 Python 环境，并且无需自行配置 MySQL。
 
+容器**创建或重建**时会自动完成：
+
+1. 若不存在则生成 Compose 默认 `config.json`（库名 `yppf`，主机 `mysql`，密码 `secret`）
+2. **确保开发数据库可用**（见下：空库导入样例；已有数据则沿用）
+3. 安装可选开发依赖（`.devcontainer/dev_requirements.txt`，仅 `postCreate`）
+
+数据库初始化由 `postCreateCommand` / `postStartCommand` 调用
+`scripts/devcontainer_ensure_db.sh`：
+
+- **库中已有用户数据**：提示沿用原有数据库，**不会** `DROP` 或重新导入样例；
+  仅执行 `migrate`
+- **空库 / 尚无表**：执行 `migrate` → 导入 [`dev_sample.sql`](dev_sample.sql)
+- **不会**自动创建 Django 超级管理员；需要访问 `/admin/` 时请自行创建（见下）
+
+> **注意：** 创建/重建容器**默认保留** Compose MySQL 卷中已有的 `yppf` 数据。
+> 若需清空并恢复为样例库，请在容器内**手动**执行：
+> `bash scripts/devcontainer_reset_sample_db.sh`
+> 仅执行宿主机 `docker compose ... up --build` **不会**跑上述钩子。
+
+开发容器内常用命令：
+
+```shell
+# 启动网站（须绑定 0.0.0.0 以便宿主机访问）
+python manage.py runserver 0.0.0.0:8000
+
+# 需要 Django Admin（/admin/）时，手动创建超级用户（二选一）
+python scripts/create_dev_superuser.py
+# 默认用户名 admin、密码 secret、显示名 admin；可用参数覆盖：
+# python scripts/create_dev_superuser.py --username admin --password secret --name admin
+# 或交互式：
+python manage.py createsuperuser
+
+# 应用代码迁移（git pull 后如有模型变更）
+python manage.py migrate --noinput
+
+# 清空并重新导入样例库（会删除已有数据）
+bash scripts/devcontainer_reset_sample_db.sh
+```
+
+样例账号密码均为 `test`（用户名形如 `S000001` / `P000001` / `O000001`）。
+手动重新导入、重置或导出样例库，见下文 [样例数据库](#样例数据库)。
+
+### 样例数据库
+
+仓库根目录的 [`dev_sample.sql`](dev_sample.sql) 是脱敏后的开发样例数据（INSERT-only）。
+Dev Container 在**空库**时会自动导入；已有数据时沿用原库，不会自动清库。
+
+**拉取更新后的 `dev_sample.sql` 时：** Compose MySQL 卷仍保留旧数据，
+`ensure_db` **不会**自动重导入。需要吃到上游样例修复时，在容器内执行
+`bash scripts/devcontainer_reset_sample_db.sh`。维护/修改 dump 后建议跑：
+`python manage.py test dm.test.test_sample_sql_integrity`。
+
+**约定：** 导入顺序必须是 **空库 → migrate → 导入 SQL**。顺序颠倒会导致
+migration / schema 冲突。样例文件路径在容器内为 `/workspace/dev_sample.sql`。
+
+#### 样例账号
+
+| 账号形态 | 示例 | 登录入口 | 密码 |
+| --- | --- | --- | --- |
+| 学生 / 自然人 / 组织 | `S000001`、`P000001`、`O000001` | 网站首页 | `test` |
+| 特殊账号（样例内） | `X000001` 等 | `/admin/` | `test` |
+| 开发超级管理员（需手动创建） | 如 `admin` | `/admin/` | 自定（脚本默认 `secret`） |
+
+首次登录改密流程已在导出时关闭（`is_newuser=false`）。
+超级管理员**不在**样例 SQL 中，也不由容器钩子创建；见上文「开发容器内常用命令」。
+
+#### 开发容器内确保数据库（与 post-create 相同，不清库）
+
+```shell
+test -f config.json || bash scripts/default_config.sh
+bash scripts/devcontainer_ensure_db.sh
+```
+
+已有数据时只会 migrate；空库才会导入样例。不会创建超级用户。
+
+#### 重置为样例数据库（会删除已有数据）
+
+推荐在**开发容器**内一键重置：
+
+```shell
+bash scripts/devcontainer_reset_sample_db.sh
+```
+
+等价分解步骤：
+
+```shell
+python scripts/import_dev_sample.py --drop-database
+python manage.py migrate --noinput
+python scripts/import_dev_sample.py --force
+```
+
+重置后如需 `/admin/`，再手动执行 `python scripts/create_dev_superuser.py`
+或 `python manage.py createsuperuser`。
+
+- `--drop-database`：清空并重建目标库后退出（**会删除已有数据**）
+- 默认读取根目录 `dev_sample.sql`；库中已有用户时会跳过；加 `--force` 会先
+  TRUNCATE 转储中出现的表再导入（保留 schema，无需先 `--drop-database`）
+- `create_dev_superuser.py` 默认创建/更新 `admin` / `secret`（可用参数覆盖）
+- 连接参数默认读取 `DB_HOST` / `DB_USER` / `DB_PASSWORD` / `DB_DATABASE`
+  （Compose 下为 `mysql` / `root` / `secret` / `yppf`）
+
+指定其它 SQL 文件：
+
+```shell
+python scripts/import_dev_sample.py --sql /workspace/path/to/other.sql --force
+```
+
+也可在**宿主机**项目根目录用 mysql 客户端清空库：
+
+Linux / macOS：
+
+```shell
+docker compose -f .devcontainer/docker-compose.yml exec -T mysql \
+  mysql -uroot -psecret -e \
+  "DROP DATABASE IF EXISTS yppf; \
+   CREATE DATABASE yppf CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+```
+
+Windows PowerShell：
+
+```powershell
+docker compose -f .devcontainer/docker-compose.yml exec -T mysql `
+  mysql -uroot -psecret -e `
+  "DROP DATABASE IF EXISTS yppf; CREATE DATABASE yppf CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+```
+
+然后在**开发容器**内：
+
+```shell
+python manage.py migrate --noinput
+python scripts/import_dev_sample.py --force
+# 可选：python scripts/create_dev_superuser.py
+```
+
+#### 备选：宿主机用 mysql 客户端导入
+
+migrate 完成后，在宿主机导入根目录文件。
+
+Linux / macOS：
+
+```shell
+docker compose -f .devcontainer/docker-compose.yml exec -T mysql \
+  mysql -uroot -psecret yppf < dev_sample.sql
+```
+
+Windows PowerShell：
+
+```powershell
+Get-Content .\dev_sample.sql -Raw -Encoding UTF8 | `
+  docker compose -f .devcontainer/docker-compose.yml exec -T mysql `
+  mysql -uroot -psecret yppf
+```
+
+#### 命令执行位置
+
+| 步骤 | 执行位置 |
+| --- | --- |
+| `docker compose` / 清空数据库 | 宿主机 |
+| `ensure_db` / `reset_sample_db` / `migrate` / 导入脚本 | 开发容器 |
+| 宿主机重定向 `< dev_sample.sql` | 宿主机 |
+
+#### 生成脱敏样例 SQL
+
+在含真实数据的库上（开发容器内）采样导出，再覆盖根目录样例文件：
+
+```shell
+python manage.py export_sample_db --ratio 0.1 --seed 42 --outdir .
+# 将生成的 dev_sample_YYYYMMDD_HHMMSS.sql 复制/重命名为根目录 dev_sample.sql
+```
+
+实现见 [`dm/management/commands/export_sample_db.py`](dm/management/commands/export_sample_db.py)
+与 [`dm/sample_db_export.py`](dm/sample_db_export.py)。请勿对已脱敏样例库再采样后当作正式样例提交。
+
+约定摘要（与导出脚本一致）：
+
+- 活动/反馈相关 URL 一律清空；活动简介与地点为 `[redacted]`
+- `FeedbackType` / `Feedback` 中未纳入样本的默认 `org_id` 置为 `NULL`（并校正 `flexible`）
+- 住宿协议仅保留样本用户的签订记录
+
+
 ### 本地环境搭建
 
 1. 安装Python，在项目根目录启动终端
@@ -151,9 +331,11 @@ python manage.py runserver ip:port
 
 - 管理员
 
-    运行`python manage.py createsuperuser`，根据指示创建管理员账号。
-
-    管理员账号可用于登录后台`/admin`，试着访问<http://localhost:8000/admin>吧。
+    Dev Container **不会**自动创建超级用户。在容器内运行
+    `python scripts/create_dev_superuser.py`（默认 `admin` / `secret`）
+    或 `python manage.py createsuperuser`，再访问
+    <http://localhost:8000/admin>。样例库内也有特殊账号（如 `X000001` /
+    `test`）可用于部分后台场景。
 
 - 交互式执行（Django终端）
 
@@ -195,6 +377,23 @@ python manage.py runserver ip:port
 - 缺少字段：`Unknown column 'xx.xxx' in 'field list'`
 
     未执行迁移或模型变动未检出，请参考[更新和迁移](#更新和迁移)。必要时可以删库重建。
+
+- 样例库：先导入 SQL 再 migrate 报错，或导入时报 `Table already exists`
+
+    请按 [样例数据库](#样例数据库) 清空库后执行 **migrate → 导入**。根目录
+    `dev_sample.sql` 应为 INSERT-only。
+
+- `import_dev_sample` 提示 Skip import
+
+    库中已有用户。确认后加 `--force`，或执行
+    `bash scripts/devcontainer_reset_sample_db.sh` 清库后重新导入。
+    Dev Container 创建/重建默认沿用已有数据库，不会自动清库。
+    `git pull` 只更新了 `dev_sample.sql` 时同样需要手动 reset 才能刷新本地库。
+
+- Dev Container 内无法连接 MySQL
+
+    确认 `mysql` 服务为 `healthy`；容器内主机应为 `mysql`
+    （环境变量 `DB_HOST` 或 `config.json`）。
 
 ## 加入我们
 
