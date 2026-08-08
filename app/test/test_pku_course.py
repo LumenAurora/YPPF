@@ -17,7 +17,11 @@ from app.models import (
     NaturalPerson,
     User,
 )
-from app.pku_course_parser import expand_lesson_to_events, parse_pku_course_html
+from app.pku_course_parser import (
+    PKU_SECTION_TIMES,
+    expand_lesson_to_events,
+    parse_pku_course_html,
+)
 from app.schedule_views import importCourseTable, mySchedule
 
 
@@ -58,6 +62,18 @@ class PkuCourseParserTest(TestCase):
         self.assertEqual(ps['day_of_week'], 2)          # 周三
         self.assertEqual(ps['start_section'], 5)
         self.assertEqual(ps['parity'], 'ODD')           # 单周
+
+    def test_section_times_official(self):
+        # 锁定北大校本部/医学部节次时间（每节 50 分钟）
+        expected = {
+            1: ('08:00', '08:50'), 2: ('09:00', '09:50'),
+            3: ('10:10', '11:00'), 4: ('11:10', '12:00'),
+            5: ('13:00', '13:50'), 6: ('14:00', '14:50'),
+            7: ('15:10', '16:00'), 8: ('16:10', '17:00'),
+            9: ('17:10', '18:00'), 10: ('18:40', '19:30'),
+            11: ('19:40', '20:30'), 12: ('20:40', '21:30'),
+        }
+        self.assertEqual(PKU_SECTION_TIMES, expected)
 
     def test_expand_excludes_past_weeks(self):
         lesson = {
