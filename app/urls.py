@@ -118,4 +118,6 @@ urlpatterns = [
 ] + [
     # 日程表
     path("schedule/", schedule_views.mySchedule.as_view(), name="schedule"),
+    path("importCourseTable/", schedule_views.importCourseTable.as_view(),
+         name="importCourseTable"),
 ]

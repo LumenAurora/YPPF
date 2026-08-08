@@ -2099,3 +2099,51 @@ class PasswordResetThrottle(models.Model):
                 name='unique_password_reset_throttle_scope',
             ),
         ]
+
+
+class AcademicCourse(models.Model):
+    """教务课表：同学上传门户课表 HTML 后解析得到的本人课程。
+
+    仅保存结构化课程信息（课名/时间/教室/教师），不保存任何门户凭证。
+    """
+
+    class Meta:
+        verbose_name = "5.教务课表"
+        verbose_name_plural = verbose_name
+        ordering = ['day_of_week', 'start_section']
+
+    class Weekday(models.IntegerChoices):
+        MON = 0, '周一'
+        TUE = 1, '周二'
+        WED = 2, '周三'
+        THU = 3, '周四'
+        FRI = 4, '周五'
+        SAT = 5, '周六'
+        SUN = 6, '周日'
+
+    class Parity(models.IntegerChoices):
+        ALL = 0, '每周'
+        ODD = 1, '单周'
+        EVEN = 2, '双周'
+
+    person = models.ForeignKey(
+        NaturalPerson, on_delete=models.CASCADE,
+        related_name='academic_courses', verbose_name='所属同学')
+    name = models.CharField('课程名称', max_length=80)
+    teacher = models.CharField('教师', max_length=80, blank=True, default='')
+    room = models.CharField('教室', max_length=60, blank=True, default='')
+    day_of_week = models.SmallIntegerField('星期几', choices=Weekday.choices)
+    start_section = models.SmallIntegerField('起始节次')
+    end_section = models.SmallIntegerField('结束节次')
+    start_time = models.TimeField('开始时间')
+    end_time = models.TimeField('结束时间')
+    week_start = models.SmallIntegerField('起始周')
+    week_end = models.SmallIntegerField('结束周')
+    parity = models.SmallIntegerField(
+        '单双周', choices=Parity.choices, default=Parity.ALL)
+    semester_start = models.DateField('学期第一周周一')
+    term = models.CharField('学期', max_length=20, blank=True, default='')
+    created_at = models.DateTimeField('导入时间', auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.name}（{self.get_day_of_week_display()} {self.start_section}-{self.end_section}节）'
