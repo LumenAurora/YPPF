@@ -6,32 +6,42 @@
 {% endblock %}
 
 {% block mainpage %}
-<div class="layout-px-spacing">
-    <div class="row layout-top-spacing">
-        <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
-            <div class="widget widget-chart-one">
-                <div class="widget-heading">
-                    <h5 class="">我的日程表</h5>
-                </div>
-                <div class="widget-content">
-                    <div class="mb-3">
-                        <span class="badge" style="background-color:#4361ee;color:#fff;">书院课程</span>
-                        <span class="badge" style="background-color:#8ba3f0;color:#fff;">课表（未发布）</span>
-                        <span class="badge" style="background-color:#2ecc71;color:#fff;">报名活动</span>
-                        <span class="badge" style="background-color:#f39c12;color:#fff;">地下室预约</span>
-                        <span class="badge" style="background-color:#9b59b6;color:#fff;">教务课表</span>
-                        <span class="badge" style="background-color:#16a085;color:#fff;">手动日程</span>
-                        <a href="/importCourseTable/" class="badge badge-info" style="text-decoration:none;">导入教务课表</a>
-                        <a href="/schedule/manage/" class="badge badge-light" style="text-decoration:none;">管理我的日程</a>
-                        {% if html_display.warn_message %}
-                        <span class="badge {% if html_display.warn_code == 2 %}badge-success{% else %}badge-danger{% endif %}">{{ html_display.warn_message }}</span>
-                        {% endif %}
+
+    <!--  BEGIN CONTENT AREA  -->
+    <div id="content" class="main-content">
+        {% if html_display.warn_code == 1 %}
+        <div class="alert alert-warning text-center">{{ html_display.warn_message }}</div>
+        {% elif html_display.warn_code == 2 %}
+        <div class="alert alert-success text-center">{{ html_display.warn_message }}</div>
+        {% endif %}
+
+        <div class="container">
+            <div class="layout-top-spacing">
+                <div class="row layout-top-spacing">
+                    <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
+                        <div class="widget widget-chart-one">
+                            <div class="widget-heading">
+                                <h5 class="">我的日程表</h5>
+                            </div>
+                            <div class="widget-content">
+                                <div class="mb-3">
+                                    <span class="badge" style="background-color:#4361ee;color:#fff;">书院课程</span>
+                                    <span class="badge" style="background-color:#8ba3f0;color:#fff;">课表（未发布）</span>
+                                    <span class="badge" style="background-color:#2ecc71;color:#fff;">报名活动</span>
+                                    <span class="badge" style="background-color:#f39c12;color:#fff;">地下室预约</span>
+                                    <span class="badge" style="background-color:#9b59b6;color:#fff;">教务课表</span>
+                                    <span class="badge" style="background-color:#16a085;color:#fff;">手动日程</span>
+                                    <a href="/importCourseTable/" class="badge badge-info" style="text-decoration:none;">导入教务课表</a>
+                                    <a href="/schedule/manage/" class="badge badge-light" style="text-decoration:none;">管理我的日程</a>
+                                    {% if html_display.warn_message %}
+                                    <span class="badge {% if html_display.warn_code == 2 %}badge-success{% else %}badge-danger{% endif %}">{{ html_display.warn_message }}</span>
+                                    {% endif %}
+                                </div>
+                                <div id="calendar" style="min-height: 600px; height: 600px; width: 100%;"></div>
+                            </div>
+                        </div>
                     </div>
-                    <div id="calendar" style="min-height: 600px; height: 600px; width: 100%;"></div>
                 </div>
-            </div>
-        </div>
-    </div>
 
     <!-- 当日待办面板 -->
     <div class="row layout-top-spacing">
@@ -145,7 +155,9 @@
             </div>
         </div>
     </div>
-</div>
+            </div>
+        </div>
+    <!-- END MAIN CONTAINER -->
 {{ schedule_events|json_script:"schedule-events" }}
 {% endblock %}
 
