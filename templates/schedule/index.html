@@ -3,6 +3,7 @@
 
 {% block add_css_file %}
 <link rel="stylesheet" href="{% static 'plugins/fullcalendar/fullcalendar.css' %}">
+<link rel="stylesheet" href="{% static 'plugins/fullcalendar/custom-fullcalendar.advance.css' %}">
 {% endblock %}
 
 {% block mainpage %}
@@ -18,11 +19,11 @@
         <div class="layout-top-spacing">
             <div class="row layout-top-spacing">
                 <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
-                    <div class="widget widget-chart-one">
-                        <div class="widget-heading">
+                    <div class="widget statbox widget box box-shadow">
+                        <div class="widget-header">
                             <h5 class="">我的日程表</h5>
                         </div>
-                        <div class="widget-content">
+                        <div class="widget-content-area">
                             <div class="mb-3">
                                 <span class="badge" style="background-color:#4361ee;color:#fff;">书院课程</span>
                                 <span class="badge" style="background-color:#8ba3f0;color:#fff;">课表（未发布）</span>
@@ -36,7 +37,7 @@
                                 <span class="badge {% if html_display.warn_code == 2 %}badge-success{% else %}badge-danger{% endif %}">{{ html_display.warn_message }}</span>
                                 {% endif %}
                             </div>
-                            <div id="calendar" style="min-height: 600px; height: 600px; width: 100%;"></div>
+                            <div id="calendar" style="width: 100%;"></div>
                         </div>
                     </div>
                 </div>
@@ -45,11 +46,11 @@
             <!-- 当日待办面板 -->
             <div class="row layout-top-spacing">
                 <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
-                    <div class="widget widget-chart-one">
-                        <div class="widget-heading">
+                    <div class="widget statbox widget box box-shadow">
+                        <div class="widget-header">
                             <h5 class="">当日待办（{{ selected_date_str }}）</h5>
                         </div>
-                        <div class="widget-content">
+                        <div class="widget-content-area">
                             {% if todos %}
                             <ul class="list-group mb-3">
                                 {% for todo in todos %}
@@ -94,11 +95,11 @@
             <!-- 快速添加手动日程/待办 -->
             <div class="row layout-top-spacing">
                 <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
-                    <div class="widget widget-chart-one">
-                        <div class="widget-heading">
-                            <h5 class="">快速添加</h5>
+                    <div class="statbox widget box box-shadow">
+                        <div class="widget-header">
+                            <h4>快速添加</h4>
                         </div>
-                        <div class="widget-content">
+                        <div class="widget-content-area">
                             <form method="post" action="/schedule/addItem/">
                                 {% csrf_token %}
                                 <div class="form-row">
@@ -175,16 +176,16 @@ $(document).ready(function () {
             right: 'month,agendaWeek,agendaDay'
         },
         defaultView: 'agendaWeek',
+        height: 650,
         defaultDate: '{{ selected_date_str }}',
         editable: false,
         eventLimit: true,
         timeFormat: 'HH:mm',
-        axisFormat: 'HH:mm',
+        lang: 'zh-cn',
         monthNames: ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'],
         monthNamesShort: ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
         dayNames: ['周日','周一','周二','周三','周四','周五','周六'],
         dayNamesShort: ['日','一','二','三','四','五','六'],
-        titleFormat: { month: 'YYYY年M月', week: 'YYYY年M月D日', day: 'YYYY年M月D日' },
         buttonText: { today: '今天', month: '月', week: '周', day: '日' },
         events: events,
         eventRender: function (calEvent, element) {

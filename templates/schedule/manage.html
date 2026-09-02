@@ -14,11 +14,15 @@
         <div class="layout-top-spacing">
             <div class="row layout-top-spacing">
                 <div class="col-xl-12 col-lg-12 col-md-12 col-sm-12 col-12 layout-spacing">
-                    <div class="widget widget-chart-one">
-                        <div class="widget-heading">
-                            <h5 class="">管理我的日程</h5>
+                    <div class="widget statbox widget box box-shadow">
+                        <div class="widget-header">
+                            <div class="row">
+                                <div class="col-xl-12 col-md-12 col-sm-12 col-12">
+                                    <h5>管理我的日程</h5>
+                                </div>
+                            </div>
                         </div>
-                        <div class="widget-content">
+                        <div class="widget-content-area">
                             {% if html_display.warn_message %}
                             <div class="alert {% if html_display.warn_code == 2 %}alert-success{% else %}alert-danger{% endif %}">
                                 {{ html_display.warn_message }}
