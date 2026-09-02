@@ -2,7 +2,7 @@
 {% load static %}
 
 {% block add_css_file %}
-<link rel="stylesheet" href="{% static 'plugins/fullcalendar/fullcalendar.min.css' %}">
+<link rel="stylesheet" href="{% static 'plugins/fullcalendar/fullcalendar.css' %}">
 {% endblock %}
 
 {% block mainpage %}
@@ -90,7 +90,7 @@
                     <h5 class="">快速添加</h5>
                 </div>
                 <div class="widget-content">
-                    <form method="post" action="/schedule/addItem/" enctype="multipart/form-data">
+                    <form method="post" action="/schedule/addItem/">
                         {% csrf_token %}
                         <div class="form-row">
                             <div class="form-group col-md-4">
