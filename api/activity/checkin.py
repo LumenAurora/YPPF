@@ -69,6 +69,9 @@ def do_checkin(person: NaturalPerson, aid: int) -> tuple[bool, str]:
     except Participation.DoesNotExist:
         # 书院课补选同学：活动发布时按当时名单建 Participation，补选后可能缺失，
         # 此处惰性补建后再签到(issue #973-2)。
+        # 注意：此分支在 atomic 块外执行，活动锁已释放。并发重试可能插入重复行
+        # 且 current_participants 不同步（Participation 无 (activity, person) 唯一约束）。
+        # 若需严格并发安全，应将资格复核、补建、计数与状态转换全部移入 atomic 块内。
         if (activity.category == Activity.ActivityCategory.COURSE
                 and activity.course_time is not None):
             from app.models import Course, CourseParticipant

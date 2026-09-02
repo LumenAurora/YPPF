@@ -31,7 +31,9 @@ def _make_person(username):
         username, username, usertype=User.Type.PERSON, password="x")
     user.is_newuser = False
     user.save()
-    return NaturalPerson.objects.create(user, name=username)
+    # NaturalPerson.name 仅 10 字符；MySQL 严格模式下超长会直接报 1406，
+    # 故此处截断（SQLite 不校验长度，容易掩盖该问题）。
+    return NaturalPerson.objects.create(user, name=username[:10])
 
 
 class OccurrenceDateTest(TestCase):

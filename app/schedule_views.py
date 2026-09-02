@@ -1,4 +1,5 @@
 """日程表页面：整合书院课时间、报名活动时间与地下室预约，并支持手动日程/待办。"""
+import re
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -6,6 +7,8 @@ from django import forms
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 
 from app.models import (
     AcademicCourse,
@@ -43,6 +46,10 @@ _MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 _PARITY_MAP = {'ALL': AcademicCourse.Parity.ALL,
                'ODD': AcademicCourse.Parity.ODD,
                'EVEN': AcademicCourse.Parity.EVEN}
+# 手动日程颜色格式（渲染进日历事件，需严格校验）
+_HEX_COLOR_RE = re.compile(r'#[0-9A-Fa-f]{6}')
+# AcademicCourse.term 列宽，超长会在 MySQL 严格模式下报错
+_TERM_MAX_LENGTH = AcademicCourse._meta.get_field('term').max_length
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +65,48 @@ class UserScheduleForm(forms.ModelForm):
             'location', 'note', 'color', 'repeat', 'repeat_end',
         ]
         widgets = {
-            'date': forms.DateInput(attrs={'type': 'date'}),
-            'start_time': forms.TimeInput(attrs={'type': 'time'}),
-            'end_time': forms.TimeInput(attrs={'type': 'time'}),
-            'repeat_end': forms.DateInput(attrs={'type': 'date'}),
-            'note': forms.TextInput(attrs={'placeholder': '选填'}),
+            'title': forms.TextInput(attrs={
+                'class': 'form-control', 'placeholder': '标题'}),
+            'category': forms.Select(attrs={'class': 'form-control'}),
+            'date': forms.DateInput(attrs={
+                'type': 'date', 'class': 'form-control'}),
+            'start_time': forms.TimeInput(attrs={
+                'type': 'time', 'class': 'form-control'}),
+            'end_time': forms.TimeInput(attrs={
+                'type': 'time', 'class': 'form-control'}),
+            'location': forms.TextInput(attrs={
+                'class': 'form-control', 'placeholder': '选填'}),
+            'note': forms.TextInput(attrs={
+                'class': 'form-control', 'placeholder': '选填'}),
+            'color': forms.TextInput(attrs={
+                'type': 'color', 'class': 'form-control'}),
+            'repeat': forms.Select(attrs={'class': 'form-control'}),
+            'repeat_end': forms.DateInput(attrs={
+                'type': 'date', 'class': 'form-control'}),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # color/repeat 在模型上有默认值，但未声明 blank=True，ModelForm 因此判定
+        # 为必填。「当日待办」快速表单只提交 title/category/date，需允许省略并在
+        # 服务端回落到模型默认值，否则该表单永远校验失败。
+        for name in ('color', 'repeat'):
+            self.fields[name].required = False
+
+    def clean_color(self):
+        color = (self.cleaned_data.get('color') or '').strip()
+        if not color:
+            return UserSchedule._meta.get_field('color').get_default()
+        # 颜色会被渲染进日历事件，限定为标准 6 位十六进制，避免注入非法内容
+        if not _HEX_COLOR_RE.fullmatch(color):
+            raise ValidationError('颜色格式应为 #RRGGBB。')
+        return color
+
+    def clean_repeat(self):
+        repeat = self.cleaned_data.get('repeat')
+        if repeat in (None, ''):
+            return UserSchedule.Repeat.NONE.value
+        return repeat
 
     def clean(self):
         cleaned = super().clean()
@@ -335,8 +378,12 @@ class mySchedule(ProfileTemplateView):
         return self.render()
 
 
+@method_decorator(csrf_protect, name='dispatch')
 class importCourseTable(ProfileTemplateView):
-    """导入教务课表：上传门户「我的课表」HTML，解析后存入本人课表。"""
+    """导入教务课表：上传门户「我的课表」HTML，解析后存入本人课表。
+
+    全局 CsrfViewMiddleware 已禁用，故显式应用 csrf_protect（AGENTS.md 约定）。
+    """
 
     template_name = 'schedule/upload.html'
     page_name = '导入教务课表'
@@ -392,27 +439,46 @@ class importCourseTable(ProfileTemplateView):
             return self.post
 
         # 4) 覆盖式写入（同一同学重新导入即替换）
+        # term 为用户自由输入，超出列宽会在 MySQL 严格模式下直接报错，
+        # 且删除已在同一事务内，必须先校验再落库。
         term = (self.request.POST.get('term') or '').strip()
-        AcademicCourse.objects.filter(person=me).delete()
-        for lesson in lessons:
-            AcademicCourse.objects.create(
-                person=me,
-                name=lesson['name'],
-                teacher=lesson['teacher'],
-                room=lesson['room'],
-                day_of_week=lesson['day_of_week'],
-                start_section=lesson['start_section'],
-                end_section=lesson['end_section'],
-                start_time=datetime.strptime(
-                    lesson['start_time'], '%H:%M').time(),
-                end_time=datetime.strptime(
-                    lesson['end_time'], '%H:%M').time(),
-                week_start=lesson['week_start'],
-                week_end=lesson['week_end'],
-                parity=_PARITY_MAP.get(lesson['parity'], AcademicCourse.Parity.ALL),
-                semester_start=semester_start,
-                term=term,
-            )
+        if len(term) > _TERM_MAX_LENGTH:
+            wrong(f'学期名称过长（最多 {_TERM_MAX_LENGTH} 个字符）。', html_display)
+            self.extra_context.update(html_display=html_display)
+            return self.post
+
+        # 删除旧课表与写入新课表必须原子完成，否则中途失败会让同学的课表
+        # 变成空表或半截数据。
+        try:
+            with transaction.atomic():
+                AcademicCourse.objects.filter(person=me).delete()
+                AcademicCourse.objects.bulk_create([
+                    AcademicCourse(
+                        person=me,
+                        name=lesson['name'],
+                        teacher=lesson['teacher'],
+                        room=lesson['room'],
+                        day_of_week=lesson['day_of_week'],
+                        start_section=lesson['start_section'],
+                        end_section=lesson['end_section'],
+                        start_time=datetime.strptime(
+                            lesson['start_time'], '%H:%M').time(),
+                        end_time=datetime.strptime(
+                            lesson['end_time'], '%H:%M').time(),
+                        week_start=lesson['week_start'],
+                        week_end=lesson['week_end'],
+                        parity=_PARITY_MAP.get(
+                            lesson['parity'], AcademicCourse.Parity.ALL),
+                        semester_start=semester_start,
+                        term=term,
+                    )
+                    for lesson in lessons
+                ])
+        except Exception:
+            wrong('课表写入失败，原有课表已保留，请稍后重试或确认文件内容。',
+                  html_display)
+            self.extra_context.update(html_display=html_display)
+            return self.post
 
         succeed(f'已成功导入 {len(lessons)} 门课程，可在「我的日程表」查看。',
                  html_display)
@@ -443,12 +509,13 @@ def _form_errors_message(form):
     return '；'.join(parts) or '表单填写有误。'
 
 
+@method_decorator(csrf_protect, name='dispatch')
 class addScheduleItem(ProfileTemplateView):
-    """快速添加手动日程/待办（内联表单 POST；GET 直接回日程页）。"""
-    http_method_names = ['get', 'post']
+    """快速添加手动日程/待办（内联表单 POST）。
 
-    def prepare_get(self):
-        return self.redirect('/schedule/')
+    全局 CsrfViewMiddleware 已禁用，故显式应用 csrf_protect（AGENTS.md 约定）。
+    """
+    http_method_names = ['post']
 
     def prepare_post(self):
         me, resp = _require_person_or_redirect(self)
@@ -470,8 +537,12 @@ class addScheduleItem(ProfileTemplateView):
             succeed(ok), f'/schedule/?date={base_date}'))
 
 
+@method_decorator(csrf_protect, name='dispatch')
 class editScheduleItem(ProfileTemplateView):
-    """编辑单条手动日程/待办。"""
+    """编辑单条手动日程/待办。
+
+    全局 CsrfViewMiddleware 已禁用，故显式应用 csrf_protect（AGENTS.md 约定）。
+    """
     template_name = 'schedule/item_form.html'
     page_name = '编辑日程'
     http_method_names = ['get', 'post']
@@ -508,12 +579,13 @@ class editScheduleItem(ProfileTemplateView):
             succeed('已保存修改。'), f'/schedule/?date={inst.date}'))
 
 
+@method_decorator(csrf_protect, name='dispatch')
 class deleteScheduleItem(ProfileTemplateView):
-    """删除单条日程/待办；若属于某重复系列且勾选 delete_series 则整系列删除。"""
-    http_method_names = ['get', 'post']
+    """删除单条日程/待办；若属于某重复系列且勾选 delete_series 则整系列删除。
 
-    def prepare_get(self):
-        return self.redirect('/schedule/manage/')
+    全局 CsrfViewMiddleware 已禁用，故显式应用 csrf_protect（AGENTS.md 约定）。
+    """
+    http_method_names = ['post']
 
     def prepare_post(self):
         me, resp = _require_person_or_redirect(self)
@@ -535,12 +607,13 @@ class deleteScheduleItem(ProfileTemplateView):
             succeed('已删除该条目。'), f'/schedule/?date={target_date}'))
 
 
+@method_decorator(csrf_protect, name='dispatch')
 class toggleTodo(ProfileTemplateView):
-    """切换待办完成状态（POST）。"""
-    http_method_names = ['get', 'post']
+    """切换待办完成状态（POST）。
 
-    def prepare_get(self):
-        return self.redirect('/schedule/')
+    全局 CsrfViewMiddleware 已禁用，故显式应用 csrf_protect（AGENTS.md 约定）。
+    """
+    http_method_names = ['post']
 
     def prepare_post(self):
         me, resp = _require_person_or_redirect(self)

@@ -67,6 +67,9 @@ class CourseSigninBackfillTest(TestCase):
             category=Activity.ActivityCategory.COURSE,
             course_time=self.ctime,
             need_apply=False,
+            # 与生产一致：create_single_course_activity 建课程活动时默认需签到，
+            # 且 do_checkin 会前置校验 need_checkin。
+            need_checkin=True,
             capacity=10,
             current_participants=10)
 
