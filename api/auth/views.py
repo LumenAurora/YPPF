@@ -16,7 +16,7 @@ wx.login() → code → 后端用 code 向微信换 openid
         │ 已绑定                           │ 未绑定
         ↓                                 ↓
    main_user = profile.user           返回 signed_openid
-        ↓                              （供后续绑定用）
+        ↓                         （不透明 one-time 绑定凭据）
    ┌────┴─────────┐
    │ 无 username  │ 有 username 
    ↓              ↓
@@ -27,17 +27,20 @@ wx.login() → code → 后端用 code 向微信换 openid
               不在 → 403
 
 ## 绑定时
-signed_openid（上一步返回）+ username + password
+signed_openid（签名随机 nonce；数据库仅保存摘要）+ username + password
         ↓
-验证 signed_openid（防伪造、有时效）
+验证并锁定 signed_openid（`signed_openid_ttl_minutes` 后过期）
         ↓
 authenticate(username, password)
+        ↓
+密码失败计数按 openid 跨重新签发累计；达到默认 5 次后锁定至 TTL 到期
+成功使用后凭据立即失效
         ↓
 user 必须是个人账户（不能是组织）
         ↓
 检查：该 openid 是否已绑定其他用户 → 是则 400
         ↓
-创建 UserWechatProfile(user, openid)
+在同一事务中创建 UserWechatProfile(user, openid) 并消费凭据
         ↓
 返回 JWT （account id为user）
 
@@ -65,17 +68,21 @@ from typing import Tuple
 from rest_framework_simplejwt.tokens import AccessToken
 import requests
 from django.conf import settings
-from django.contrib.auth import authenticate
-from django.core import signing
-from django.db import transaction
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework import status
-from rest_framework.exceptions import AuthenticationFailed, ValidationError
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api.config import CONFIG
+from api.auth.binding import (
+    WechatBindingAttemptLimitError,
+    WechatBindingAuthenticationError,
+    WechatBindingError,
+    issue_binding_credential,
+    redeem_binding_credential,
+)
 from api.auth.serializers import WxBindSerializer, WxCodeSerializer
 from api.auth.ticket import WEBVIEW_TICKET_TTL, create_webview_ticket
 from api.authentication import WxJWTAuthentication
@@ -147,24 +154,6 @@ def _issue_jwt_for_user(user: User, account_id: str | None = None) -> str:
     return str(token)
 
 
-def _sign_openid(openid: str) -> str:
-    """
-    Issue a signed token that encodes the openid and expires quickly.
-    """
-    signer = signing.TimestampSigner(salt="wx_miniapp_openid")
-    return signer.sign(openid)
-
-
-def _unsign_openid(signed_openid: str) -> str:
-    """
-    Validate and extract the openid from a signed token.
-    """
-    signer = signing.TimestampSigner(salt="wx_miniapp_openid")
-    return signer.unsign(
-        signed_openid, max_age=CONFIG.signed_openid_ttl_minutes * 60
-    )
-
-
 def _get_account_id(user: User) -> str | None:
     """
     获取主账号 account_id（username）。
@@ -232,14 +221,23 @@ def _check_user_in_accounts(username: str, account_id: str) -> bool:
 class WxCodeLoginView(APIView):
     """
     Accepts the temporary code from ``wx.login`` and returns either a JWT
-    (for already-bound users) or a short-lived signed_openid for binding.
+    (for already-bound users) or an opaque one-time ``signed_openid`` binding
+    credential. The credential expires after ``signed_openid_ttl_minutes`` and
+    is invalid after successful use. Reissuing for the same openid rotates the
+    nonce without resetting failures; exhaustion blocks issuance until expiry.
     """
 
     permission_classes = [AllowAny]
 
     @extend_schema(
         summary="微信小程序登录",
-        description="使用微信小程序 wx.login() 返回的 code 换取 openid，如果已绑定则返回 JWT，否则返回 signed_openid 用于后续绑定。可选的 username 参数用于指定登录到哪个账户（必须在可登录账户列表中）。",
+        description=(
+            "使用微信小程序 wx.login() 返回的 code 换取 openid。如果已绑定则返回 JWT；"
+            "否则返回不透明的 one-time signed_openid 绑定凭据。该凭据在 "
+            "signed_openid_ttl_minutes 后过期；同一 openid 重新签发会轮换 nonce"
+            "但不会清零失败次数，达到默认 5 次密码失败后将锁定至 TTL 到期。"
+            "可选的 username 参数用于指定登录到哪个账户（必须在可登录账户列表中）。"
+        ),
         request=WxCodeSerializer,
         responses={
             200: OpenApiResponse(
@@ -253,7 +251,13 @@ class WxCodeLoginView(APIView):
                         "username": {"type": "string", "description": "用户名 (仅当 status=bound 时存在)"},
                         "name": {"type": "string", "description": "用户名称 (仅当 status=bound 时存在)"},
                         "account_id": {"type": "string", "description": "主账号 username (仅当 status=bound 时存在)"},
-                        "signed_openid": {"type": "string", "description": "签名的 openid (仅当 status=unbound 时存在)"},
+                        "signed_openid": {
+                            "type": "string",
+                            "description": (
+                                "签名随机 nonce 的不透明 one-time 绑定凭据"
+                                "（仅当 status=unbound 时存在）"
+                            ),
+                        },
                         "expires_in": {"type": "integer", "description": "signed_openid/token 过期时间（秒)"},
                     },
                 },
@@ -339,7 +343,13 @@ class WxCodeLoginView(APIView):
                 )
 
         # 未绑定微信账号，返回临时 signed_openid 用于后续绑定
-        signed_openid = _sign_openid(openid)
+        try:
+            signed_openid = issue_binding_credential(openid)
+        except WechatBindingAttemptLimitError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return Response(
             {
@@ -352,14 +362,22 @@ class WxCodeLoginView(APIView):
 
 class WxBindView(APIView):
     """
-    Bind an openid to a Django user using username/password and return a JWT.
+    Redeem an opaque one-time ``signed_openid`` with username/password to bind
+    its openid to a Django user and return a JWT. It expires after
+    ``signed_openid_ttl_minutes`` and is invalid after success. Failed attempts
+    are shared by all credentials for an openid until expiry.
     """
 
     permission_classes = [AllowAny]
 
     @extend_schema(
         summary="绑定微信账号",
-        description="使用账号密码和 signed_openid 绑定微信账号，绑定成功后返回 JWT",
+        description=(
+            "使用账号密码兑换不透明的 one-time signed_openid 绑定凭据并绑定微信"
+            "账号，绑定成功后返回 JWT。凭据在 signed_openid_ttl_minutes 后过期，"
+            "同一 openid 的重新签发不会清零失败次数；达到默认 5 次后锁定至 TTL"
+            "到期。"
+        ),
         request=WxBindSerializer,
         responses={
             200: OpenApiResponse(
@@ -371,12 +389,16 @@ class WxBindView(APIView):
                         "token": {"type": "string", "description": "JWT token"},
                         "token_type": {"type": "string", "description": "Bearer"},
                         "username": {"type": "string", "description": "用户名"},
+                        "account_id": {
+                            "type": "string",
+                            "description": "主账号 username",
+                        },
                         "expires_in": {"type": "integer", "description": "token过期时间（秒)"},
                     },
                 },
             ),
-            400: OpenApiResponse(description="请求错误，如 signed_openid 无效或已过期"),
-            401: OpenApiResponse(description="认证失败，账号或密码错误"),
+            400: OpenApiResponse(description="请求错误，如 signed_openid 无效、已使用、已过期或已耗尽"),
+            401: OpenApiResponse(description="认证失败，账号或密码错误；达到默认 5 次失败后凭据失效"),
         },
         tags=["微信小程序认证"],
     )
@@ -384,41 +406,19 @@ class WxBindView(APIView):
         serializer = WxBindSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # print("Received", serializer.validated_data["signed_openid"])
-
         try:
-            openid = _unsign_openid(serializer.validated_data["signed_openid"])
-        except signing.SignatureExpired as exc:
-            raise ValidationError({"signed_openid": "签名已过期，请重新登录微信授权"}) from exc
-        except signing.BadSignature as exc:
-            raise ValidationError({"signed_openid": "无效的签名，请重新登录微信授权"}) from exc
-
-        username = serializer.validated_data["username"]
-        password = serializer.validated_data["password"]
-        user = authenticate(username=username, password=password)
-
-        if user is None:
-            raise AuthenticationFailed("账号或密码错误")
-        if user.is_org():
-            raise ValidationError({"username": "请使用小组管理员的个人账户绑定"})
-        if not user.is_person():
-            raise ValidationError({"username": "该类型账户暂时不支持微信小程序"})
-
-        with transaction.atomic():
-            if (
-                UserWechatProfile.objects.select_for_update()
-                .filter(openid=openid)
-                .exclude(user=user)
-                .exists()
-            ):
-                raise ValidationError({"signed_openid": "该微信已绑定其他账号"})
-
-            profile, created = UserWechatProfile.objects.select_for_update().get_or_create(
-                user=user, defaults={"openid": openid}
+            user = redeem_binding_credential(
+                signed_openid=serializer.validated_data["signed_openid"],
+                username=serializer.validated_data["username"],
+                password=serializer.validated_data["password"],
             )
-            if not created and profile.openid != openid:
-                profile.openid = openid
-                profile.save(update_fields=["openid"])
+        except WechatBindingAuthenticationError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except WechatBindingError as exc:
+            raise ValidationError({exc.field: str(exc)}) from exc
 
         account_id = _get_account_id(user)
         token = _issue_jwt_for_user(user, account_id=account_id)
@@ -429,7 +429,7 @@ class WxBindView(APIView):
                 "token_type": "Bearer",
                 "username": user.username,
                 "account_id": account_id,
-                "expires_in": CONFIG.token_expire_minutes * 60, # in seconds
+                "expires_in": CONFIG.token_expire_minutes * 60,  # in seconds
             }
         )
 

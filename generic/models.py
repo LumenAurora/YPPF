@@ -33,7 +33,9 @@ __all__ = [
     'PermissionBlacklist',
     'CreditRecord',
     'YQPointRecord',
-    'UserWechatProfile'
+    'UserWechatProfile',
+    'PendingWechatBinding',
+    'PendingWebviewTicket',
 ]
 
 
@@ -522,3 +524,39 @@ class UserWechatProfile(models.Model):
 
     def __str__(self):
         return f"{self.user.username}-{self.openid}"
+
+
+class PendingWechatBinding(models.Model):
+    """Expiring binding ledger that stores a nonce digest, never its raw value."""
+    class Meta:
+        verbose_name = "待绑定微信凭据"
+        verbose_name_plural = verbose_name
+
+    nonce_digest = models.CharField(max_length=64, unique=True)
+    openid = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+
+
+class PendingWebviewTicket(models.Model):
+    """Digest-only, expiring ticket used to establish a WebView session."""
+
+    class Purpose(models.TextChoices):
+        WEBVIEW_LOGIN = "webview_login", "WebView 登录"
+
+    class Meta:
+        verbose_name = "待消费 WebView 登录凭据"
+        verbose_name_plural = verbose_name
+
+    token_digest = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="pending_webview_tickets",
+    )
+    purpose = models.CharField(
+        max_length=32,
+        choices=Purpose.choices,
+        default=Purpose.WEBVIEW_LOGIN,
+    )
+    expires_at = models.DateTimeField(db_index=True)

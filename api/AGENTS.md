@@ -57,14 +57,16 @@ interchangeable:
 
 | Credential | Purpose | Issued by | Lifetime and storage | Transport |
 | --- | --- | --- | --- | --- |
-| `signed_openid` | Proves the WeChat identity only during first-time account binding. It is not an API login credential. | `_sign_openid()` after an unbound `wx.login` exchange. | `signed_openid_ttl_minutes` (10 minutes by default). Signed with Django's `TimestampSigner`; it is short-lived but not consumed on use. | JSON body of `POST /api/v2/auth/wx/bind/`. |
+| `signed_openid` | Proves the WeChat identity only during first-time account binding. It is not an API login credential. | `issue_binding_credential()` in `api/auth/binding.py` after an unbound `wx.login` exchange. | `signed_openid_ttl_minutes` (10 minutes by default). Its versioned, purpose-bound signed random nonce is returned only to the client; one `PendingWechatBinding` per openid stores the digest, expiry, and shared failed-attempt count. Reissuance rotates the nonce without resetting failures. Success deletes the row; exhaustion retains a locked tombstone until expiry. | JSON body of `POST /api/v2/auth/wx/bind/`. |
 | JWT access token | Authenticates normal mini-program API requests and identifies the currently selected person or organization account. | `_issue_jwt_for_user()` after login or binding. | `token_expire_minutes` (120 minutes by default). The client stores it and obtains a new token by logging in again; there is currently no refresh-token endpoint. | `Authorization: Bearer <token>`. Never place it in a URL. |
-| WebView ticket | Converts an authenticated mini-program identity into a Django session for a website WebView without exposing the JWT in the URL. | `POST /api/v2/auth/ticket/`, which requires a valid JWT. | `ticket_ttl_seconds` (60 seconds by default). Stored in Django cache and deleted when consumed. | Query parameter to `/redirect/?ticket=<ticket>&to=<path>`. |
+| WebView ticket | Converts an authenticated mini-program identity into a Django session for a website WebView without exposing the JWT in the URL. | `POST /api/v2/auth/ticket/`, which requires a valid JWT. | `ticket_ttl_seconds` (60 seconds by default). Only a digest, user, purpose, and expiry are stored in `PendingWebviewTicket`; redemption locks and deletes the database row atomically. | Query parameter to `/redirect/?ticket=<ticket>&to=<path>`. |
 
 The relevant implementation is split across `api/auth/views.py` (flows and
-token issuance), `api/auth/ticket.py` (ticket creation/consumption),
-`api/authentication.py` (DRF authenticators), `generic/models.py`
-(`UserWechatProfile`), and `generic/views.py` (the WebView redirect bridge).
+JWT issuance), `api/auth/binding.py` (digest-only pending credential issuance
+and atomic one-time redemption), `api/auth/ticket.py` (ticket
+creation/consumption), `api/authentication.py` (DRF authenticators),
+`generic/models.py` (`UserWechatProfile`, `PendingWechatBinding`, and
+`PendingWebviewTicket`), and `generic/views.py` (the WebView redirect bridge).
 
 ### First-time binding
 
@@ -74,19 +76,29 @@ token issuance), `api/auth/ticket.py` (ticket creation/consumption),
    WeChat `jscode2session` endpoint. App ID, secret, endpoint, and TTL values
    come from `api.config.CONFIG`; they must not be hard-coded.
 3. If no `UserWechatProfile` has that `openid`, the response has
-   `status="unbound"` and a short-lived `signed_openid`. This signed value is
-   tamper-evident and time-limited, but it is only a handoff between login and
-   binding; do not accept it as authentication for another endpoint.
+   `status="unbound"` and a short-lived `signed_openid`. Its bearer value is a
+   versioned, purpose-bound signed random nonce, not an openid. The database
+   stores only its digest, openid, expiry, and failed-attempt count; it is a
+   one-time handoff between login and binding, never authentication for
+   another endpoint. Reissuing for the same openid rotates the nonce and
+   invalidates the prior credential without resetting failures.
 4. The client sends `signed_openid`, the YPPF `username`, and `password` to
    `POST /api/v2/auth/wx/bind/`, which is also public.
-5. The backend verifies the signature and age, authenticates the YPPF
-   credentials, and requires a personal account. Organizations must be used
-   through a personal administrator and cannot be bound directly.
-6. Inside a transaction, the backend creates or updates
-   `UserWechatProfile`. Its one-to-one `user` field and unique `openid` field
-   enforce at most one WeChat identity per user and one user per WeChat
-   identity. Binding fails if the `openid` belongs to another user.
+5. The backend verifies the signature and age, locks the pending credential
+   row, authenticates the YPPF credentials, and requires a personal account.
+   Organizations must be used through a personal administrator and cannot be
+   bound directly. The default password-attempt limit is 5 per openid across
+   all credentials issued during the current TTL window.
+6. Inside the profile-creation transaction, the backend creates a
+   `UserWechatProfile` only for an unbound account and consumes the locked
+   pending row. Its one-to-one `user` field and unique `openid` field enforce
+   at most one WeChat identity per user and one user per WeChat identity.
+   Binding rejects an existing account or openid binding; it never silently
+   rebinds or updates a profile.
 7. A successful binding immediately returns the user's JWT access token.
+   Clients must restart `wx.login()` after credential expiry or replay. After
+   failed-attempt exhaustion, new issuance remains blocked until the retained
+   ledger row expires.
 
 Never log the WeChat code, raw `openid`, `signed_openid`, password, app secret,
 JWT, or ticket. Binding changes must preserve signature expiry, database
@@ -128,20 +140,19 @@ or a token accepted from the mini-program client.
 1. An authenticated client sends `POST /api/v2/auth/ticket/` with its bearer
    JWT.
 2. `create_webview_ticket()` creates a cryptographically random token and
-   caches the selected user's primary key under a short TTL.
+   stores only its digest, selected user, `webview_login` purpose, and expiry
+   in the shared database.
 3. The client opens `/redirect/?ticket=<ticket>&to=<path>` in the WebView.
-4. `TicketAuthentication` consumes and deletes the cache entry, loads the
-   user, and `redirect_to_webview()` establishes a normal Django session
-   before redirecting to `to`.
+4. `TicketAuthentication` locks and atomically deletes the database row,
+   loads the user, and `redirect_to_webview()` establishes a normal Django
+   session before redirecting to the validated local `to` path.
 
 A ticket is single-purpose, short-lived, and intended for one use. Never use
-`TicketAuthentication` on ordinary API endpoints, persist tickets, retry a
-consumed ticket, or send it to another host. Ticket creation and redirect
-consumption must share the same Django cache; a multi-host deployment needs a
-cache backend shared by all participating processes. The current redirect
-handler passes `to` to Django without validating that it is local, so callers
-must supply an internal path and any new redirect implementation must reject
-external, protocol-relative, or otherwise unsafe destinations.
+`TicketAuthentication` on ordinary API endpoints, persist raw tickets, retry
+a consumed ticket, or send it to another host. Ticket creation and redirect
+consumption must use the same database. Redirect targets are restricted to
+single-slash local paths; absolute, protocol-relative, backslash, and other
+unsafe destinations fall back to a fixed local path.
 
 ### Embedded WebView navigation patch
 
@@ -215,8 +226,13 @@ Use the following decision rules:
   username, `account_id`, or other JWT display claim as the authorization
   decision by itself.
 - Reserve `TicketAuthentication` for the `/redirect/` WebView bridge and
-  reserve `signed_openid` for `/wx/bind/`. Neither may replace JWT
-  authentication on feature APIs.
+  reserve `signed_openid` for `/wx/bind/`. `signed_openid` is a signed random
+  versioned, purpose-bound nonce backed by a digest-only pending row;
+  redemption locks and consumes it in the profile-creation transaction. Only
+  one row exists per openid, and rotating its nonce does not reset its shared
+  failure count. It expires, is one-time, permits 5 failed password attempts
+  by default, and remains locked after exhaustion until expiry. Neither
+  credential may replace JWT authentication on feature APIs.
 
 Document the authentication requirement and 401/403 responses with
 `extend_schema`. Add tests for anonymous access, missing/malformed/expired

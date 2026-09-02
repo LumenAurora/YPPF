@@ -1,9 +1,16 @@
+from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.http import HttpResponse
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
+from openpyxl import Workbook
 from rest_framework import viewsets
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 # TODO: Leaky dependency
 from utils.marker import fix_me
-from generic.models import User
 from app.models import NaturalPerson
 from app.view.base import ProfileTemplateView
 from dormitory.config import dormitory_config as CONFIG
@@ -12,10 +19,8 @@ from dormitory.serializers import (
     DormitoryAssignmentSerializer, DormitorySerializer,
     AgreementSerializerFixme, AgreementSerializer)
 from questionnaire.models import AnswerSheet, AnswerText, Question, Survey
+from questionnaire.utils import create_answersheet, submit_answersheet
 from questionnaire.validators import validate_answer_body
-from django.core.exceptions import ValidationError
-from django.http import HttpResponse
-from openpyxl import Workbook
 
 class DormitoryViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Dormitory.objects.all()
@@ -23,30 +28,56 @@ class DormitoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class DormitoryAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = DormitoryAssignment.objects.filter(active = True)
+    permission_classes = [IsAuthenticated]
     serializer_class = DormitoryAssignmentSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        assignments = (DormitoryAssignment.objects
+                       .filter(active=True)
+                       .select_related('dormitory'))
+        if (not user.is_authenticated or not user.active
+                or not user.is_person()):
+            return assignments.none()
+        return assignments.filter(user=user)
 
 
 class DormitoryAgreementViewSetFixme(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated]
     serializer_class = AgreementSerializerFixme
+
+    def requires_agreement(self):
+        user = self.request.user
+        return (user.is_authenticated and user.active
+                and user.is_student())
 
     def get_queryset(self):
         # Only active students need to sign the agreement
-        require_agreement = User.objects.filter(active=True,
-                                                utype=User.Type.STUDENT).contains(self.request.user)
-        if require_agreement:
+        if self.requires_agreement():
             return Agreement.objects.filter(user=self.request.user)
-        # A hack to return something, so that the frontend won't redirect
-        official_user = User.objects.get(username='zz00000')
-        Agreement.objects.get_or_create(user=official_user)
-        return Agreement.objects.filter(user=official_user)
+        return Agreement.objects.none()
+
+    def list(self, request, *args, **kwargs):
+        if not self.requires_agreement():
+            # Keep the legacy frontend's non-empty list contract without
+            # creating a synthetic Agreement during GET.
+            return Response([{'id': 0}])
+        return super().list(request, *args, **kwargs)
 
 
 class DormitoryAgreementViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Agreement.objects.all()
+    permission_classes = [IsAuthenticated]
     serializer_class = AgreementSerializer
 
+    def get_queryset(self):
+        user = self.request.user
+        if (not user.is_authenticated or not user.active
+                or not user.is_person()):
+            return Agreement.objects.none()
+        return Agreement.objects.filter(user=user)
 
+
+@method_decorator(csrf_protect, name='dispatch')
 class DormitoryRoutineQAView(ProfileTemplateView):
 
     template_name = 'dormitory/routine_QA.html'
@@ -86,8 +117,6 @@ class DormitoryRoutineQAView(ProfileTemplateView):
 
     def post(self):
         survey = self.get_survey()
-        assert not AnswerSheet.objects.filter(creator=self.request.user,
-                                              survey=survey).exists()
 
         # Collect submitted answers for repopulation on validation failure
         submitted = {
@@ -151,16 +180,35 @@ class DormitoryRoutineQAView(ProfileTemplateView):
                     **render_kwargs,
                 )
 
-        with transaction.atomic():
-            sheet = AnswerSheet.objects.create(creator=self.request.user,
-                                               survey=survey)
-            for question in survey.questions.order_by('order'):
-                answer = submitted[str(question.order)]
-                if not answer:
-                    continue
-                AnswerText.objects.create(question=question,
-                                          answersheet=sheet,
-                                          body=answer)
+        if survey.status != Survey.Status.PUBLISHED:
+            return self.render(
+                html_display=dict(
+                    warn_code=1,
+                    warn_message='只能提交已发布的问卷！',
+                ),
+                **render_kwargs,
+            )
+
+        try:
+            with transaction.atomic():
+                sheet = create_answersheet(survey.pk, self.request.user)
+                for question in survey.questions.order_by('order'):
+                    answer = submitted[str(question.order)]
+                    if not answer:
+                        continue
+                    AnswerText.objects.create(question=question,
+                                              answersheet=sheet,
+                                              body=answer)
+                submit_answersheet(sheet.pk, self.request.user)
+        except DRFValidationError as exc:
+            message = exc.detail[0] if exc.detail else '问卷提交失败，请稍后重试。'
+            return self.render(
+                html_display=dict(
+                    warn_code=1,
+                    warn_message=str(message),
+                ),
+                **render_kwargs,
+            )
         return self.render(submitted=True)
 
 
@@ -178,8 +226,9 @@ class DormitoryAssignResultView(ProfileTemplateView):
     def show_dorm_assign(self):
         user = self.request.user
         try:
-            assignment = DormitoryAssignmentViewSet.queryset.get(user=user)
-            dorm_assignment = DormitoryAssignmentViewSet.queryset.filter(
+            active_assignments = DormitoryAssignment.objects.filter(active=True)
+            assignment = active_assignments.get(user=user)
+            dorm_assignment = active_assignments.filter(
                 dormitory=assignment.dormitory)
             roommates = [NaturalPerson.objects.get_by_user(assign.user)
                          for assign in dorm_assignment.exclude(user=user)]

@@ -1,18 +1,25 @@
 import json
 import random
-import requests
 from datetime import datetime, timedelta
 from typing import cast, List, Tuple
 
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.contrib import auth
 from django.db import transaction
 from django.db.models import Q, F, Sum, QuerySet
 from django.contrib.auth.password_validation import CommonPasswordValidator, NumericPasswordValidator
 from django.core.exceptions import ValidationError
 
+from django.core.validators import validate_email
+from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.http import require_http_methods
+
+from django.views.decorators.http import require_POST
+
+
 from utils.config.cast import str_to_time
+from utils.http.utils import safe_local_redirect_target
 from utils.marker import deprecated
-from utils.hasher import MyMD5Hasher
 from app.views_dependency import *
 from app.models import (
     NaturalPerson,
@@ -35,14 +42,18 @@ from app.models import (
     AcademicQA,
     HomepageImage,
 )
+from app.password_reset_forms import PasswordResetForm, PasswordResetRequestForm
 from app.utils import (
     get_person_or_org,
     record_modify_with_session,
     update_related_account_in_session,
 )
 from extern.wechat import (
-    send_verify_code,
     invite_to_wechat,
+)
+from extern.password_reset import (
+    queue_prepared_password_reset_email,
+    queue_prepared_password_reset_wechat,
 )
 from app.notification_utils import (
     notification_status_change,
@@ -67,58 +78,27 @@ from semester.api import current_semester
 
 
 
+@csrf_protect
 @login_required(redirect_field_name="origin")
+@require_POST
 @logger.secure_view()
 def shiftAccount(request: HttpRequest):
+    """Switch the current person session to an authorized related account."""
 
     username = request.session.get("NP")
     if not username:
         return redirect(message_url(wrong('没有可切换的账户信息，请重新登录!')))
 
-    oname = ""
-    if request.method == "GET" and request.GET.get("oname"):
-        oname = request.GET["oname"]
+    oname = request.POST.get("oname", "")
 
     # 不一定更新成功，但无所谓
     update_related_account_in_session(
         request, username, shift=True, oname=oname)
 
-    if request.method == "GET" and request.GET.get("origin"):
-        arg_url = request.GET["origin"]
-        if arg_url.startswith('/'):  # 暂时只允许内部链接
-            return redirect(arg_url)
-    return redirect("/welcome/")
-
-
-# Return content
-# Sname 姓名 Succeed 成功与否
-wechat_login_coder = MyMD5Hasher("wechat_login")
-
-
-@logger.secure_view()
-def miniLogin(request: HttpRequest):
-    try:
-        assert request.method == "POST"
-        username = request.POST["username"]
-        password = request.POST["password"]
-        secret_token = request.POST["secret_token"]
-        assert wechat_login_coder.verify(username, secret_token) == True
-        user = User.objects.get(username=username)
-
-        userinfo = auth.authenticate(username=username, password=password)
-
-        if userinfo:
-
-            auth.login(request, userinfo)
-
-            # request.session["username"] = username 已废弃
-            en_pw = GLOBAL_CONFIG.hasher.encode(username)
-            user_account = NaturalPerson.objects.get_by_user(username)
-            return JsonResponse({"Sname": user_account.name, "Succeed": 1}, status=200)
-        else:
-            return JsonResponse({"Sname": username, "Succeed": 0}, status=400)
-    except:
-        return JsonResponse({"Sname": "", "Succeed": 0}, status=400)
+    origin = safe_local_redirect_target(
+        request, request.POST.get("origin"), "/welcome/"
+    )
+    return redirect(origin)
 
 
 @login_required(redirect_field_name="origin")
@@ -622,6 +602,7 @@ def requestLoginOrg(request: UserRequest):
     return redirect(message_url(succeed(f'成功切换到{org}的账号!'), '/orginfo/'))
 
 
+@ensure_csrf_cookie
 @login_required(redirect_field_name="origin")
 @utils.check_user_access(redirect_url="/logout/")
 @logger.secure_view()
@@ -856,19 +837,19 @@ def homepage(request: UserRequest):
         signup_list.append(dictmp)
 
     # 如果提交了心愿，发生如下的操作
-    if request.method == "POST" and request.POST:
-        wishtext = request.POST.get("wish")
-        background = ""
-        if request.POST.get("backgroundcolor") is not None:
-            bg = request.POST["backgroundcolor"]
-            try:
-                assert len(bg) == 7 and bg[0] == "#"
-                int(bg[1:], base=16)
-                background = bg
-            except:
-                print(f"心愿背景颜色{bg}不合规")
-        new_wish = Wishes.objects.create(text=wishtext, background=background)
-        new_wish.save()
+    # if request.method == "POST" and request.POST:
+    #     wishtext = request.POST.get("wish")
+    #     background = ""
+    #     if request.POST.get("backgroundcolor") is not None:
+    #         bg = request.POST["backgroundcolor"]
+    #         try:
+    #             assert len(bg) == 7 and bg[0] == "#"
+    #             int(bg[1:], base=16)
+    #             background = bg
+    #         except:
+    #             print(f"心愿背景颜色{bg}不合规")
+    #     new_wish = Wishes.objects.create(text=wishtext, background=background)
+    #     new_wish.save()
 
     # 心愿墙！！！！!最近一周的心愿，已经逆序排列，如果超过100个取前100个就可
     wishes = Wishes.objects.filter(
@@ -1434,163 +1415,100 @@ def search(request: HttpRequest):
     return render(request, "search.html", locals())
 
 
+@ensure_csrf_cookie
+@csrf_protect
+@require_http_methods(["GET", "POST"])
 @logger.secure_view()
 @utils.record_attack(Exception, as_attack=True)
 def forgetPassword(request: HttpRequest):
-    """
-        忘记密码页（Pylance可以提供文档字符串支持）
-
-        页面效果
-        -------
-        - 根据（邮箱）验证码完成登录，提交后跳转到修改密码界面
-        - 本质是登录而不是修改密码
-        - 如果改成支持验证码登录只需修改页面和跳转（记得修改函数和页面名）
-
-        页面逻辑
-        -------
-        1. 发送验证码
-            1.5 验证码冷却避免多次发送
-        2. 输入验证码
-            2.5 保留表单信息
-        3. 错误提醒和邮件发送提醒
-
-        实现逻辑
-        -------
-        - 通过脚本使按钮提供不同的`send_captcha`值，区分按钮
-        - 通过脚本实现验证码冷却，页面刷新后重置冷却（避免过长等待影响体验）
-        - 通过`session`保证安全传输验证码和待验证用户
-        - 成功发送/登录后才在`session`中记录信息
-        - 页面模板中实现消息提醒
-            - 消息提示现在与整体统一
-            - 添加`alert`表示需要提醒
-            - 添加`noshow`不在页面显示文字
-        - 尝试发送验证码后总是弹出提示框，通知用户验证码的发送情况
-
-        注意事项
-        -------
-        - 尝试忘记密码的不一定是本人，一定要做好隐私和逻辑处理
-            - 用户邮箱应当部分打码，避免向非本人提供隐私数据！
-        - 连接设置的timeout为6s
-        - 如果引入企业微信验证，建议将send_captcha分为'qywx'和'email'
-    """
+    """Request or consume a password-reset token without logging in."""
     if request.user.is_authenticated:
         return redirect("/welcome/")
 
-    if request.session.get("received_user"):
-        username = request.session["received_user"]  # 自动填充，方便跳转后继续
+    display = {}
+    username = ""
+    token = ""
     if request.method == "POST":
-        username = request.POST["username"]
-        send_captcha = request.POST["send_captcha"]
-        vertify_code = request.POST["vertify_code"]  # 用户输入的验证码
+        action = request.POST.get("action", "")
+        if action in ("email", "wechat"):
+            request_form = PasswordResetRequestForm(request.POST)
+            if request_form.is_valid():
+                username = request_form.cleaned_data["username"]
+                def prepare_delivery():
+                    if not utils.check_password_reset_request_rate(
+                        request, username
+                    ):
+                        return None
+                    user = User.objects.filter(username=username).first()
+                    person = None
+                    if user is not None:
+                        try:
+                            person = NaturalPerson.objects.get_by_user(user)
+                        except NaturalPerson.DoesNotExist:
+                            pass
+                    if person is not None:
+                        if action == "email":
+                            try:
+                                validate_email(person.email)
+                            except ValidationError:
+                                return None
+                            token = utils.create_password_reset_token(
+                                request, user)
+                            return person.name, person.email, token
+                        elif action == "wechat":
+                            token = utils.create_password_reset_token(
+                                request, user)
+                            return user.username, token
+                    return None
 
-        user = User.objects.filter(username=username)
-        if not user:
-            display = wrong("账号不存在")
-        elif len(user) != 1:
-            display = wrong("用户名不唯一，请联系管理员")
-        else:
-            user = user[0]
-            try:
-                person = NaturalPerson.objects.get_by_user(user)  # 目前只支持自然人
-            except:
-                display = wrong("暂不支持小组账号验证码登录！")
-                display["alert"] = True
-                return render(request, "forget_password.html", locals())
-            if send_captcha in ["yes", "email"]:    # 单个按钮(yes)发送邮件
-                email = person.email
-                if not email or email.lower() == "none" or "@" not in email:
-                    display = wrong(
-                        "您没有设置邮箱，请联系管理员"
-                        + "或发送姓名、学号和常用邮箱至gypjwb@pku.edu.cn进行修改"
-                    )  # TODO:记得填
+                if action == "email":
+                    queue_prepared_password_reset_email(prepare_delivery)
                 else:
-                    captcha = utils.get_captcha(request, username)
-                    msg = (
-                        f"<h3><b>亲爱的{person.name}同学：</b></h3><br/>"
-                        "您好！您的账号正在进行邮箱验证，本次请求的验证码为：<br/>"
-                        f'<p style="color:orange">{captcha}'
-                        '<span style="color:gray">(仅'
-                        f'<a href="{request.build_absolute_uri()}">当前页面</a>'
-                        "有效)</span></p>"
-                        f'点击进入<a href="{request.build_absolute_uri("/")}">元培成长档案</a><br/>'
-                        "<br/>"
-                        "元培学院开发组<br/>" + datetime.now().strftime("%Y年%m月%d日")
+                    queue_prepared_password_reset_wechat(prepare_delivery)
+            display = succeed(
+                "若账号及联系方式有效，重置凭证将发送至已绑定渠道")
+            display.update(alert=True, noshow=True, colddown=60)
+        elif action == "reset":
+            reset_form = PasswordResetForm(request.POST)
+            username = request.POST.get("username", "")
+            token = request.POST.get("token", "")
+            if reset_form.is_valid():
+                try:
+                    reset_succeeded = utils.reset_password_from_token(
+                        request,
+                        reset_form.cleaned_data["username"],
+                        reset_form.cleaned_data["token"],
+                        reset_form.cleaned_data["new_password"],
                     )
-                    post_data = {
-                        "sender": "元培学院开发组",  # 发件人标识
-                        "toaddrs": [email],  # 收件人列表
-                        "subject": "YPPF登录验证",  # 邮件主题/标题
-                        "content": msg,  # 邮件内容
-                        # 若subject为空, 第一个\n视为标题和内容的分隔符
-                        "html": True,  # 可选 如果为真则content被解读为html
-                        "private_level": 0,  # 可选 应在0-2之间
-                        # 影响显示的收件人信息
-                        # 0级全部显示, 1级只显示第一个收件人, 2级只显示发件人
-                        # content加密后的密文
-                        "secret": CONFIG.email.hasher.encode(msg),
-                    }
-                    post_data = json.dumps(post_data)
-                    pre, suf = email.rsplit("@", 1)
-                    if len(pre) > 5:
-                        pre = pre[:2] + "*" * len(pre[2:-3]) + pre[-3:]
-                    try:
-                        response = requests.post(
-                            CONFIG.email.url, post_data, timeout=6)
-                        response = response.json()
-                        if response["status"] != 200:
-                            display = wrong(f"未能向{pre}@{suf}发送邮件")
-                            print("向邮箱api发送失败，原因：", response["data"]["errMsg"])
-                        else:
-                            # 记录验证码发给谁 不使用username防止被修改
-                            utils.set_captcha_session(
-                                request, username, captcha)
-                            display = succeed(f"验证码已发送至{pre}@{suf}")
-                            display["noshow"] = True
-                    except:
-                        display = wrong("邮件发送失败：超时")
-                    finally:
-                        display["alert"] = True
-                        display.setdefault("colddown", 60)
-            elif send_captcha in ["wechat"]:    # 发送企业微信消息
-                username = person.person_id.username
-                captcha = utils.get_captcha(request, username)
-                send_verify_code(username, captcha)
-                display = succeed(f"验证码已发送至企业微信")
-                display["noshow"] = True
-                display["alert"] = True
-                utils.set_captcha_session(request, username, captcha)
-                display.setdefault("colddown", 60)
-            else:
-                captcha, expired, old = utils.get_captcha(
-                    request, username, more_info=True)
-                if not old:
-                    display = wrong("请先发送验证码")
-                elif expired:
-                    display = wrong("验证码已过期，请重新发送")
-                elif str(vertify_code).upper() == captcha.upper():
-                    auth.login(request, user)
-                    update_related_account_in_session(
-                        request, user.username)
-                    utils.clear_captcha_session(request)
-                    # request.session["username"] = username 已废弃
-                    request.session["forgetpw"] = "yes"
-                    return redirect(reverse("modpw"))
+                except ValidationError as error:
+                    display = wrong(error.messages[0])
                 else:
-                    display = wrong("验证码错误")
-                display.setdefault("colddown", 30)
-    return render(request, "forget_password.html", locals())
+                    if reset_succeeded:
+                        return redirect(
+                            reverse("index") + "?modinfo=success")
+                    display = wrong("重置凭证无效或已失效")
+            else:
+                error = next(iter(reset_form.errors.values()))[0]
+                display = wrong(str(error))
+        else:
+            display = wrong("重置凭证无效或已失效")
+
+    context = {
+        "display": display,
+        "username": username,
+    }
+    return render(request, "forget_password.html", context)
 
 
+@csrf_protect
 @login_required(redirect_field_name="origin")
 @utils.check_user_access(redirect_url="/logout/", is_modpw=True)
+@require_http_methods(["GET", "POST"])
 @logger.secure_view()
 def modpw(request: UserRequest):
     """
-        可能在三种情况进入这个页面：首次登陆；忘记密码；或者常规的修改密码。
-        在忘记密码时，可以允许不输入旧的密码
-        在首次登陆时，现在写的也可以不输入旧的密码（我还没想好这样合不合适）
-            以上两种情况都可以直接进行密码修改
-        常规修改要审核旧的密码
+        首次登录时重复输入新密码；常规修改必须验证原密码。
+        忘记密码使用独立的 /forgetpw/ token 流程。
     """
     user = request.user
     isFirst = request.user.is_newuser
@@ -1601,7 +1519,6 @@ def modpw(request: UserRequest):
 
     err_code = 0
     err_message = None
-    forgetpw = request.session.get("forgetpw", "") == "yes"  # added by pht
     username = request.user.username
 
     if request.method == "POST" and request.POST:
@@ -1610,11 +1527,11 @@ def modpw(request: UserRequest):
         strict_check = True
         min_length = 8
         try:
-            if oldpassword == newpw and strict_check and not (forgetpw or isFirst):
+            if oldpassword == newpw and strict_check and not isFirst:
                 raise ValidationError(message="新密码不能与原密码相同")
             elif newpw == username and strict_check:
                 raise ValidationError(message="新密码不能与学号相同")
-            elif newpw != oldpassword and (forgetpw or isFirst):  # added by pht
+            elif newpw != oldpassword and isFirst:
                 raise ValidationError(message="两次输入的密码不匹配")
             elif len(newpw) < min_length:
                 raise ValidationError(message=f"新密码不能短于{min_length}位")
@@ -1624,21 +1541,9 @@ def modpw(request: UserRequest):
         except ValidationError as e:
             err_code = 1
             err_message = e.message
-        # if oldpassword == newpw and strict_check and not (forgetpw or isFirst):
-        #     err_code = 1
-        #     err_message = "新密码不能与原密码相同"
-        # elif newpw == username and strict_check:
-        #     err_code = 2
-        #     err_message = "新密码不能与学号相同"
-        # elif newpw != oldpassword and (forgetpw or isFirst):  # added by pht
-        #     err_code = 5
-        #     err_message = "两次输入的密码不匹配"
-        # elif len(newpw) < min_length:
-        #     err_code = 6
-        # err_message = f"新密码的长度不能少于{min_length}位"
         else:
-            # 在1、忘记密码 2、首次登录 3、验证旧密码正确 的前提下，可以修改
-            if forgetpw or isFirst:
+            # 首次登录或原密码验证成功时可以修改。
+            if isFirst:
                 userauth = True
             else:
                 userauth = auth.authenticate(
@@ -1648,16 +1553,13 @@ def modpw(request: UserRequest):
                 try:  # modified by pht: if检查是错误的，不存在时get会报错
                     user.set_password(newpw)
                     user.is_newuser = False
-                    user.save()
-
-                    if forgetpw:
-                        request.session.pop("forgetpw")  # 删除session记录
+                    user.save(update_fields=['password', 'is_newuser'])
 
                     # record_modify_with_session(request,
                     #     "首次修改密码" if isFirst else "修改密码")
                     urls = reverse("index") + "?modinfo=success"
                     return redirect(urls)
-                except:  # modified by pht: 之前使用的if检查是错误的
+                except Exception:
                     err_code = 3
                     err_message = "学号不存在"
             else:

@@ -82,3 +82,5 @@ dormitory/references/*
 
 # 本地测试配置（SQLite，不入库）
 _local_test_settings.py
+# DM management commands
+dm/management/*
