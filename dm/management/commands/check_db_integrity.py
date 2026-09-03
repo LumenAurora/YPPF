@@ -64,10 +64,14 @@ class Command(BaseCommand):
         """C3 (issue #957 评论补充, Deophius): 同一人+学年，选了书院课程不应
         同时拥有在职的 ANNUAL 职务。
         业务假设：CourseParticipant.course.year 与 Position.year 对应；
-        若实际语义不同（如仅限特定 CourseType），需据此调整子查询。"""
+        若实际语义不同（如仅限特定 CourseType），需据此调整子查询。
+
+        修正：限定 status=SUCCESS，排除 FAILED/UNSELECT 等无效选课记录，
+        避免虚增违规数。"""
         sub = CourseParticipant.objects.filter(
             person=OuterRef("person"),
             course__year=OuterRef("year"),
+            status=CourseParticipant.Status.SUCCESS,
         )
         return (
             Position.objects.filter(
